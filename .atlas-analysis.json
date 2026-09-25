@@ -1,0 +1,102 @@
+{
+  "projectType": "saas",
+  "projectName": "Lyra",
+  "projectDescription": "A self-hosted web proxy with an in-browser experience featuring free anime streaming, a games library, cloud sync, and built-in tab cloaking.",
+  "theme": "luma",
+  "primaryColor": "#b3b3b3",
+  "lightColor": "#0756d4",
+  "darkColor": "#7cace9",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "self-hosting",
+              "local-development"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/mochi",
+              "architecture/nuru",
+              "architecture/folio"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/proxy",
+              "features/anime",
+              "features/games",
+              "features/cloud-sync",
+              "features/cloaking",
+              "features/extensions"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment",
+              "configuration/nuru-config",
+              "configuration/wireguard",
+              "configuration/caddy"
+            ]
+          },
+          {
+            "group": "Services",
+            "pages": [
+              "services/cloudsync",
+              "services/isao",
+              "services/tls-approval"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Service-worker-based web proxy via Folio (Scramjet) with JavaScript rewriting",
+    "Mochi: Rust reverse proxy with multi-layer in-memory and disk caching",
+    "Nuru: Rust Wisp/WebSocket proxy server for TCP/UDP tunneling",
+    "Free anime streaming with HLS support and disk-cached segments",
+    "Games library aggregated from multiple external sources",
+    "Cloud sync for settings and bookmarks via encrypted SQLite backend",
+    "Chrome extension support via Rivet (DNR, content scripts, popups)",
+    "Tab cloaking (site appearance masking) with focus-aware switching",
+    "WireGuard VPN routing for isolated proxy traffic",
+    "Adaptive capacity management that auto-tunes concurrency based on RAM"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth/register",
+    "POST /api/auth/login",
+    "POST /api/auth/logout",
+    "GET /api/auth/me",
+    "DELETE /api/auth/me",
+    "POST /api/sync/upload",
+    "GET /api/sync/download",
+    "GET /api/sync/meta",
+    "GET /api/anime/episodes/:mal_id",
+    "GET /api/anime/relations/:mal_id",
+    "GET /api/anime/alttitles/:anilist_id",
+    "GET /api/anime/episodes (identity query)",
+    "POST /api/anime/identity/resolve",
+    "POST /api/anime/resolve-stream",
+    "GET /health",
+    "GET /mochi/health",
+    "GET /nuru/health",
+    "GET /cloudsync/health",
+    "GET /isao/health",
+    "GET /eturnal/health",
+    "GET /stream/:path (HLS/video stream proxy)",
+    "Rivet.Rivet (browser extension runtime class)",
+    "createRivetContentScriptPlugin()",
+    "findMatchingCommand() / triggerCommand()",
+    "buildExtensionUrl() / chromeExtensionUrl()"
+  ]
+}

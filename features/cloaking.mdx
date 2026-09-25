@@ -1,0 +1,85 @@
+---
+title: 'Tab Cloaking: Hide Lyra Behind a Decoy Site'
+sidebarTitle: 'Cloaking'
+description: 'Lyra tab cloaking disguises the page title and favicon as a different site. Focus cloaking, site cloaking, and link cloaking work independently.'
+---
+
+Tab cloaking changes your browser tab's visible title and favicon so that Lyra appears to be a different website at a glance. Three independent cloaking modes are available — site cloaking, focus cloaking, and link cloaking — and each can be configured separately from **Settings → Cloaking**.
+
+## Site cloaking
+
+Site cloaking sets a persistent decoy appearance for the Lyra tab. The title and favicon are replaced with those of the selected site, and a `MutationObserver` prevents any script from overwriting the title back.
+
+The default site cloak is **Coursera**. Available options are:
+
+| Value | Tab title | Favicon |
+|---|---|---|
+| `coursera` *(default)* | Coursera | Coursera favicon |
+| `none` | Lyra (real appearance) | Lyra favicon |
+| `google` | Google | `google.com/favicon.ico` |
+| `google classroom` | Home - Classroom | Google Classroom logo |
+| `google docs` | Google Docs | Google Docs favicon |
+| `youtube` | YouTube | YouTube favicon |
+| `google drive` | Google Drive | Google Drive icon |
+| `schoology` | Home \| Schoology | Schoology favicon |
+| `wikipedia` | Wikipedia, the free encyclopedia | Wikipedia favicon |
+| `canva` | Home - Canva | Canva favicon |
+
+The selected value is stored in `localStorage` under the key `siteCloaking`. Custom events (`siteCloakingUpdated`) update the appearance immediately without a page reload.
+
+## Focus cloaking
+
+Focus cloaking lets you show **two different appearances** depending on whether the tab is currently focused.
+
+- **Tab is focused and visible** → shows the real Lyra appearance
+- **Tab is blurred or hidden** → shows the selected site cloak appearance
+
+This lets you quickly switch back to Lyra's real UI when you are actively using it, while the tab looks cloaked whenever you switch away.
+
+Focus cloaking state is stored in `localStorage` under `focusCloaking` and defaults to **enabled** (`true`). It responds to the `focus`, `blur`, and `visibilitychange` browser events.
+
+<Note>
+  Focus cloaking and site cloaking interact: if site cloaking is set to `none`, focus cloaking has no visible effect since both the active and inactive appearances are the real Lyra UI.
+</Note>
+
+## Link cloaking
+
+Link cloaking opens Lyra inside a deceptive wrapper tab and redirects the original tab to Google Classroom. The result is a browser window where the original URL bar shows `classroom.google.com` while an invisible iframe contains the real Lyra app.
+
+**How it works:**
+
+<Steps>
+  <Step title="Generate the wrapper page">
+    Lyra builds a minimal HTML page containing an `<iframe>` pointed at `window.location.origin` (your Lyra instance) with the selected site cloak title and favicon in the `<head>`.
+  </Step>
+  <Step title="Open the wrapper in a new tab">
+    Depending on the selected method, the wrapper page is opened as an `about:blank` tab (written via `document.write`) or as a `blob:` URL (created with `URL.createObjectURL`).
+  </Step>
+  <Step title="Redirect the original tab">
+    The original tab navigates to `https://classroom.google.com/`, so anyone glancing at the address bar sees the real Google Classroom URL.
+  </Step>
+</Steps>
+
+Available link cloaking methods, stored under `linkCloaking`:
+
+| Value | Mechanism |
+|---|---|
+| `none` *(default)* | Disabled |
+| `about:blank` | Opens wrapper in a blank tab via `document.write` |
+| `blob:` | Opens wrapper as a blob URL, automatically revoked on load |
+
+<Warning>
+  Link cloaking requires a pop-up to open successfully. If your browser blocks pop-ups for the Lyra origin, the wrapper tab will not open and the redirect will not occur. Allow pop-ups for your Lyra instance to use this feature.
+</Warning>
+
+## Settings storage
+
+All cloaking settings are stored in `localStorage` and survive page reloads:
+
+| localStorage key | Cloaking mode | Default |
+|---|---|---|
+| `siteCloaking` | Site cloaking value | `"coursera"` |
+| `focusCloaking` | Focus cloaking enabled | `"true"` |
+| `linkCloaking` | Link cloaking method | `"none"` |
+
+Settings take effect immediately via custom DOM events dispatched by the Settings UI — no page reload is required.

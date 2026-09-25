@@ -1,0 +1,85 @@
+---
+title: 'Browser Games Library: Thousands of Games in Lyra'
+sidebarTitle: 'Games'
+description: 'Lyra aggregates thousands of browser games from multiple curated sources including Selenite, EduRocks, wasm.rip, Velara, Truffled, and gn-math.'
+---
+
+Lyra ships with a built-in browser games library that aggregates catalogs from six external game sources. Every game is launched in the proxied browser context, routed through Folio and Mochi just like any other website — no separate configuration required.
+
+## Game sources
+
+Six sources are available. The active source is selected in **Settings → Game Source** and stored in `localStorage` under the key `gameSource`.
+
+<CardGroup cols={2}>
+  <Card title="Selenite" icon="star">
+    **Default source.** Fetches from `selenite.cc/resources/games.json`. Games are parsed from a JSON array with `directory`, `name`, `cover`, `author`, and `featured` fields.
+  </Card>
+  <Card title="EduRocks" icon="graduation-cap">
+    Fetches from `d20q8iy6t6707a.cloudfront.net`. The catalog is embedded inside a minified JS bundle with a custom alphabet encoding; Lyra decodes it automatically.
+  </Card>
+  <Card title="wasm.rip" icon="microchip">
+    Fetches from `wasm.rip/games.json`. Specializes in WebAssembly-based games.
+  </Card>
+  <Card title="Velara" icon="gamepad">
+    Fetches from `velara.cc/data/games.json`. Supports featured flags and DMCA-aware entries.
+  </Card>
+  <Card title="Truffled" icon="leaf">
+    Fetches from `truffled.lol/js/json/g.json`. JSON payload contains a top-level `games` array.
+  </Card>
+  <Card title="gn-math" icon="calculator">
+    Fetches from a jsDelivr CDN mirror of the `gn-math` repository. Featured games appear first in the sorted list.
+  </Card>
+</CardGroup>
+
+## Source origins
+
+| Key | Catalog URL |
+|---|---|
+| `selenite` | `https://selenite.cc/resources/games.json` |
+| `edurocks` | `https://d20q8iy6t6707a.cloudfront.net/index.html` |
+| `wasm.rip` | `https://wasm.rip/games.json` |
+| `velara` | `https://velara.cc/data/games.json` |
+| `truffled` | `https://truffled.lol/js/json/g.json` |
+| `gn-math` | `https://cdn.jsdelivr.net/gh/freebuisness/assets@latest/zones.json` |
+
+All catalog requests pass through Mochi, so the games source is never contacted directly from your browser.
+
+## Switching sources
+
+Open **Settings** and select a new value under **Game Source**. The change takes effect immediately; the catalog reloads from the newly selected source. If you want to change the source programmatically, update `localStorage.setItem("gameSource", "<key>")` and call `resolveGameSource()`.
+
+## Catalog behavior
+
+After a catalog is fetched, Lyra normalizes every entry into a common `GameEntry` shape:
+
+```ts
+type GameEntry = {
+  id: string | number;
+  name: string;
+  author?: string;
+  coverUrl: string;
+  gameUrl: string;
+  isExternal: boolean;
+  featured: boolean;
+  sourceKey: GameSourceKey;
+};
+```
+
+Games are sorted alphabetically by name. For `gn-math`, featured games are promoted to the top of the list before alphabetical sorting is applied.
+
+Cover images are proxied through Mochi's `/!cover!/` route, so thumbnails load without exposing your IP to the upstream CDN.
+
+## Search
+
+The games catalog supports full-text search via `catalogSearch.ts`. Search is performed locally against normalized titles and author names — no additional network request is made. The search algorithm ranks results by match quality (exact prefix, word boundary, substring) and returns them in ranked order.
+
+## Diagnostics
+
+If games fail to load, a diagnostics panel is available for debugging playback issues. Error messages are mapped from the `GameCatalogErrorKind` type:
+
+| Kind | Message |
+|---|---|
+| `network` / `temporary-source` | Source temporarily unreachable; try again shortly |
+| `upstream-data` | Source returned invalid data; try another source |
+| `unavailable` | Source currently unavailable; try another source |
+| `implementation` | Internal parsing error; try again shortly |

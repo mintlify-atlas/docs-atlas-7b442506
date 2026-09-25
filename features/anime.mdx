@@ -1,0 +1,85 @@
+---
+title: 'Free Anime Streaming in Lyra'
+sidebarTitle: 'Anime'
+description: 'How Lyra streams anime via HLS through Mochi stream cache, episode resolution through Isao, and the in-browser player with quality selection.'
+---
+
+Lyra includes a fully integrated anime streaming feature powered by the **Anikoto** provider, with metadata enriched from AniList and MyAnimeList. Streams are proxied as HLS through Mochi's stream cache, meaning everything — catalog, episodes, and video — flows through your own server without touching a third-party relay.
+
+## Stream resolution flow
+
+When you open an anime and press play, Lyra follows a multi-step resolution pipeline:
+
+<Steps>
+  <Step title="Browse the catalog">
+    The AnimeCatalog component displays a canvas-rendered grid of cover images fetched as WebP through Mochi's `/!cover!/` route. Catalog data is fetched from AniList, Anikoto, and Kitsu, then merged and deduplicated client-side.
+  </Step>
+  <Step title="Resolve canonical IDs">
+    Lyra calls `POST /api/anime/identity/resolve` with the anime's known IDs (AniList, MAL, Kitsu, Anikoto). The server returns a unified identity including the canonical Anikoto ID required for episode lookup.
+  </Step>
+  <Step title="Fetch episode list">
+    Episode data is retrieved from Anikoto's series endpoint and cached in-memory for 10 minutes. Each episode record includes its number, optional title, and available languages (`sub` / `dub`).
+  </Step>
+  <Step title="Resolve the stream URL">
+    Lyra calls `POST /api/anime/resolve-stream` with the selected episode number and language. The server returns a `mochi_url` pointing to Mochi's HLS stream cache.
+  </Step>
+  <Step title="Play via HLS player">
+    The in-browser HLS player loads the `mochi_url`. Adaptive bitrate streaming is active by default; manual quality selection is also available.
+  </Step>
+</Steps>
+
+## Metadata sources
+
+Lyra merges anime metadata from three providers, ranked by priority:
+
+| Provider | Priority | Used for |
+|---|---|---|
+| Jikan (MyAnimeList) | Highest | Episode counts, canonical metadata |
+| AniList | High | Trending/popular catalogs, cover images, scores |
+| Kitsu | Medium | Fallback catalog, episode counts |
+| Anikoto | Base | Stream URLs, episode availability, recent anime |
+
+Results from all providers are merged by shared provider IDs (AniList ID, MAL ID, Kitsu ID, Anikoto ID). Duplicate entries are collapsed; episode counts are taken from the highest-priority source that has a confirmed value.
+
+## Identity system
+
+The anime identity system maps between all four provider namespaces and is used throughout the app to ensure consistent playback URLs:
+
+- **AniList ID** — used for metadata and trending feeds
+- **MAL ID** — used for episode count lookups via Jikan
+- **Kitsu ID** — used as fallback for episode counts
+- **Anikoto ID** — required for actual stream resolution
+
+When browsing the catalog, IDs are resolved lazily and merged as more providers respond.
+
+## Language options
+
+Each episode can be played in either **sub** (subtitled) or **dub** (dubbed) when the Anikoto source provides both. The language selector appears in the episode picker and defaults to `sub`.
+
+## Quality selection
+
+The HLS player uses **adaptive bitrate (ABR)** by default, automatically selecting the highest quality stream that fits the player's rendered size (`capLevelToPlayerSize: true`). You can also pin a specific quality:
+
+| Setting | Behavior |
+|---|---|
+| `auto` | ABR — adjusts dynamically |
+| `1080p` / `720p` / `480p` / `360p` | Pins to the closest available level at or below the target height |
+
+If no level at or below the target exists, the player falls back to the lowest available level. Quality selection is powered by `hlsQuality.ts` and applied directly to the `hls.currentLevel` property of the HLS.js instance.
+
+## Catalog caching
+
+To avoid hammering metadata APIs on every visit, Lyra caches catalog data aggressively:
+
+| Cache | Storage | TTL |
+|---|---|---|
+| Feed (trending / all) | `localStorage` | 30 minutes |
+| Search results | `sessionStorage` | 10 minutes |
+| Anikoto recent | In-memory | 30 minutes |
+| Episode list | In-memory | 10 minutes |
+
+Calling `resetAnimeCache()` clears all in-memory caches and removes `lyra-anime-*` keys from both `localStorage` and `sessionStorage`.
+
+## Adult content
+
+An optional toggle (`animeAdultContent` in `localStorage`) gates adult-rated entries returned by AniList. When disabled (the default), entries marked `isAdult: true` are filtered out before reaching the catalog UI.

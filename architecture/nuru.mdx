@@ -1,0 +1,199 @@
+---
+title: "Nuru: Wisp v2 WebSocket Tunnel Server"
+sidebarTitle: "Nuru"
+description: "How Nuru handles WebSocket-to-TCP/UDP tunneling for Lyra using the Wisp v2 protocol, thread-per-core runtime, and adaptive connection gates."
+---
+
+Nuru is Lyra's WebSocket transport layer. While Mochi handles HTTP/HTTPS resource proxying, Nuru handles everything that requires a raw TCP or UDP connection — native WebSockets, game networking, and any other TCP traffic that the browser cannot make directly. Clients connect to Nuru over WebSocket and open multiplexed streams using the **Wisp v2 protocol**. Each stream is independently tunneled to its TCP or UDP destination on the public internet.
+
+## Protocol Support
+
+Nuru routes each incoming WebSocket upgrade to one of three handlers, determined by the request path and sub-protocol headers:
+
+| Protocol | Handler | Description |
+|---|---|---|
+| **Wisp v2** | `handle_wisp` | Standard Wisp multiplexed streams. Supports TCP and UDP streams within a single WebSocket connection. |
+| **Wispnet** | `handle_wispnet` | Multi-hop Wisp tunneling, where streams are relayed through one or more intermediate Wisp servers. |
+| **WsProxy** | `handle_wsproxy` | Plain WebSocket-to-TCP proxy without Wisp framing, for clients that prefer the simpler protocol. |
+
+Wisp is the default and preferred mode. The path prefix used to identify Wisp connections is configurable via `wisp.prefix` in `config.toml` (default: `/w`).
+
+## Wisp v2 Extensions
+
+Nuru's Wisp handshake advertises the following extensions, each enabled independently in `config.toml`:
+
+<CardGroup cols={2}>
+  <Card title="UDP extension" icon="circle-nodes">
+    Adds `STREAM_TYPE_UDP` support, allowing DNS lookups, QUIC, and game protocols that use UDP. Controlled by `wisp.extensions = ["udp", ...]`.
+  </Card>
+  <Card title="MOTD extension" icon="message">
+    Broadcasts a message-of-the-day string to connecting clients. Defaults to the Nuru version string. Configurable via `wisp.motd_extension`.
+  </Card>
+  <Card title="Password extension" icon="key">
+    Optional credential-based authentication. When `password_extension_required = true`, unauthenticated clients are rejected. Users and hashed passwords are listed under `wisp.password_extension_users`.
+  </Card>
+  <Card title="Certificate extension" icon="lock">
+    Optional TLS certificate-based authentication. Certificate public keys are loaded from paths listed in `wisp.certificate_extension_keys`.
+  </Card>
+</CardGroup>
+
+## Thread-per-Core Runtime
+
+Nuru is configured with `runtime = "threadpercore"` in the default `config.toml`. When this mode is active and the socket type is TCP (not Unix), Nuru spawns **one `tokio` runtime shard per CPU core**, each with its own `ServerListener`. This allows the kernel to distribute incoming TCP connections across all cores using `SO_REUSEPORT`, eliminating the accept lock bottleneck present in single-listener designs.
+
+```toml
+# config.toml
+[server]
+runtime = "threadpercore"
+bind = ["tcp", "127.0.0.1:4001"]
+```
+
+On systems where `threadpercore` produces only one listener (e.g., Windows, or Unix socket mode), Nuru falls back gracefully to a single listener on the tokio multi-thread runtime.
+
+## Connection Lifecycle
+
+```
+TCP connection accepted by ServerListener
+  │
+  ▼
+route() ── inspects path, headers, Upgrade
+  │
+  ├─► Wisp path → handle_wisp()
+  │     └─► wisp-mux multiplexer
+  │           └─► per-stream TCP/UDP connect + relay
+  │
+  ├─► Wispnet path → handle_wispnet()
+  │     └─► multi-hop relay to upstream Wisp server
+  │
+  └─► WsProxy path → handle_wsproxy()
+        └─► raw WebSocket ↔ TCP relay
+```
+
+Each accepted connection is checked against `CONNECTION_GATE` via `try_acquire()`. If no permit is available, the connection is dropped with a warning log and no error frame is sent to the client — this is intentional so that back-pressure propagates to the load balancer. Once the connection is admitted, the stream count gate (`STREAM_GATE`) governs the number of simultaneously open Wisp streams within that connection.
+
+## Adaptive Connection Gates
+
+Nuru creates two `AdaptiveGate` instances at startup, both rebalanced every **2 seconds**:
+
+| Gate | Purpose | Memory per permit |
+|---|---|---|
+| `CONNECTION_GATE` | Total concurrent WebSocket connections | `(wisp.buffer_size × 4) + 512 KB` |
+| `STREAM_GATE` | Total concurrent streams across all connections | `(stream.buffer_size × 2) + 128 KB` |
+
+Permit bounds are derived at startup from detected RAM and CPU core count:
+
+```
+connection_min  = cpu_cores
+connection_max  = min(total_ram / (8 × connection_memory), cores × 256)
+connection_init = clamp(cores × 32, min, max)
+
+stream_min  = cores × 2
+stream_max  = min(total_ram / (4 × stream_memory), cores × 512)
+stream_init = clamp(cores × 64, min, max)
+```
+
+Buffer sizes themselves are RAM-adaptive (from `nuru::tuning`):
+
+| RAM | `wisp_buffer_size` | `stream_buffer_size` |
+|---|---|---|
+| < 2 GB | 32 KB | 64 KB |
+| 2 – 8 GB | 64 KB | 128 KB |
+| > 8 GB | 128 KB | 256 KB |
+
+## DNS Resolver
+
+Nuru uses **Hickory DNS** (`hickory-resolver`) by default, providing caching and parallel query support. The resolver is initialised once at startup:
+
+- If `stream.dns_servers` is **empty** in `config.toml`, Nuru reads the system resolver configuration (`/etc/resolv.conf` on Linux) and wraps it in a Hickory `TokioResolver`.
+- If `stream.dns_servers` is provided (e.g., `["1.1.1.1", "1.0.0.1", "8.8.8.8"]`), a custom Hickory resolver is built from those addresses.
+- If reading the system configuration fails, Nuru logs a warning and falls back to `tokio::net::lookup_host` (system resolver, no caching).
+
+The resolve cache has a configurable TTL (`wisp.resolve_cache_ttl_secs`, default 300 s) and a RAM-adaptive maximum entry count (`total_ram_mb × 4`, clamped to 10,000 – 100,000 entries).
+
+## Configuration Reference
+
+Nuru's configuration is loaded from a TOML file (passed via `--config`). The full default configuration:
+
+```toml
+[server]
+bind = ["tcp", "127.0.0.1:4001"]
+transport = "websocket"
+resolve_ipv6 = false
+tcp_nodelay = true
+file_raw_mode = false
+use_real_ip_headers = true
+non_ws_response = "hii you should join discord.gg/4GeWaGPh6c :3!!"
+log_level = "WARN"
+runtime = "threadpercore"
+
+[wisp]
+allow_wsproxy = true
+prefix = "/w"
+wisp_v2 = true
+extensions = ["udp", "motd"]
+password_extension_required = false
+certificate_extension_required = false
+ping_interval_secs = 15
+resolve_cache_ttl_secs = 300
+
+[stream]
+tcp_nodelay = true
+resolve_timeout_ms = 5000
+connect_timeout_ms = 8000
+allow_udp = true
+allow_wsproxy_udp = true
+dns_servers = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]
+allow_direct_ip = true
+allow_loopback = true
+allow_multicast = true
+allow_global = true
+allow_non_global = true
+```
+
+<Info>
+  `allow_loopback = true` and `allow_non_global = true` in the default config are permissive. For production deployments serving untrusted users, consider setting both to `false` and using explicit `allow_hosts` / `block_hosts` allowlists.
+</Info>
+
+Key `[stream]` access control fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `allow_tcp_hosts` | `[string]` | Regex allowlist for TCP hostnames (empty = allow all) |
+| `block_tcp_hosts` | `[string]` | Regex blocklist for TCP hostnames |
+| `allow_udp_hosts` | `[string]` | Regex allowlist for UDP hostnames |
+| `block_udp_hosts` | `[string]` | Regex blocklist for UDP hostnames |
+| `allow_hosts` | `[string]` | Regex allowlist applied to all protocols |
+| `block_hosts` | `[string]` | Regex blocklist applied to all protocols |
+| `allow_ports` | `[[u16, u16]]` | Inclusive port ranges to allow |
+| `block_ports` | `[[u16, u16]]` | Inclusive port ranges to block |
+
+## Stats and Observability
+
+### SIGUSR1 / Live Stats
+
+On Linux, sending `SIGUSR1` to a Nuru process causes it to log a full stats report at `INFO` level. This is useful for a quick snapshot without needing an HTTP endpoint:
+
+```bash
+kill -USR1 $(pidof nuru)
+```
+
+### HTTP Stats Endpoint
+
+An optional HTTP stats endpoint can be enabled in `config.toml`:
+
+```toml
+[server]
+# Serve stats on the same port as the Wisp server at /stats:
+stats_endpoint = "/stats"
+
+# Or bind a separate listener for stats only:
+# stats_endpoint = ["tcp", "127.0.0.1:4299"]
+```
+
+### NURU_INSTANCES
+
+Like Mochi, Nuru respects the `NURU_INSTANCES` environment variable. Set it to the number of sibling systemd instances so each instance uses only its proportional share of total RAM and CPU when computing gate bounds:
+
+```bash
+NURU_INSTANCES=4 nuru --config /etc/nuru/config.toml
+```

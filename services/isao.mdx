@@ -1,0 +1,445 @@
+---
+title: 'Isao Service: Anime Metadata and Stream Resolution'
+sidebarTitle: 'Isao'
+description: "API reference for Isao, Lyra's anime metadata service — episode data from Jikan/AniList, anime identity resolution, and stream URL generation."
+---
+
+Isao is the Rust/Axum microservice that aggregates and normalises anime metadata for Lyra. It fetches episode lists and counts from [Jikan](https://jikan.moe) (the unofficial MyAnimeList API) and [AniList](https://anilist.co), cross-references IDs across a wide range of databases (AniList, MAL, AniDB, Kitsu, TMDB, TVDB, IMDB, and more), and generates stream URLs for the Anikoto provider. All upstream responses are cached in-memory using [Moka](https://github.com/moka-rs/moka) with per-endpoint TTLs.
+
+## Overview
+
+| Property | Value |
+|---|---|
+| **Default port** | `4003` (override with `ISAO_PORT`) |
+| **Cache backend** | Moka in-process cache |
+| **Upstream sources** | Jikan (MAL), AniList, Anikoto, Kitsu |
+| **Concurrency** | Adaptive gate auto-tuned to available RAM and CPU cores |
+
+## Adaptive upstream gate
+
+Isao uses an adaptive concurrency gate that limits simultaneous upstream HTTP requests to prevent memory exhaustion. The initial limit is `cores × 2`, the maximum is `min(cores × 8, memory_mb / 32)` (capped at 256). A background task rebalances the limit every 2 seconds based on observed latency and memory pressure. The current state is exposed at `GET /api/anime/metrics`.
+
+## Environment variables
+
+| Variable | Description |
+|---|---|
+| `ISAO_PORT` | Listening port (default: `4003`) |
+| `RUST_LOG` | Log filter (default: `isao=info`) |
+
+---
+
+## Endpoints
+
+### Episode list
+
+<ParamField path="GET /api/anime/episodes/:mal_id" />
+
+Returns episode metadata for an anime identified by its MyAnimeList ID. The full episode list is cached for **10 minutes**.
+
+<ParamField path="mal_id" type="integer" required>
+  MyAnimeList (MAL) anime ID.
+</ParamField>
+
+<ParamField query="count_only" type="boolean">
+  When `true`, returns only the episode count without fetching or returning the full episode list. Useful for progress checks. Defaults to `false`.
+</ParamField>
+
+<ResponseField name="count" type="integer">
+  Total episode count. `0` if unavailable.
+</ResponseField>
+
+<ResponseField name="episodes" type="array">
+  Array of episode objects. Empty when `count_only=true`.
+</ResponseField>
+
+<CodeGroup>
+```http Request
+GET /api/anime/episodes/1735
+```
+
+```json 200 OK
+{
+  "count": 26,
+  "episodes": [
+    { "mal_id": 1735, "number": 1, "title": "Pierrot le Fou" },
+    { "mal_id": 1735, "number": 2, "title": "Stray Dog Strut" }
+  ]
+}
+```
+
+```json 200 OK (count_only)
+{
+  "count": 26,
+  "episodes": []
+}
+```
+
+```json 502 Bad Gateway
+{
+  "count": 0,
+  "episodes": [],
+  "error": "anime episode provider is temporarily unavailable... /ᐠ - ˕ -マ"
+}
+```
+</CodeGroup>
+
+Isao tries Jikan first for both episodes and count, then falls back to AniList for the count if Jikan returns zero. A 15-second negative result cache prevents repeat upstream calls after a failure.
+
+---
+
+### Anime relations
+
+<ParamField path="GET /api/anime/relations/:mal_id" />
+
+Returns the relations graph (sequels, prequels, side stories, etc.) for an anime. Jikan is tried first, then AniList as fallback. Cached for **30 minutes**.
+
+<ParamField path="mal_id" type="integer" required>
+  MyAnimeList anime ID.
+</ParamField>
+
+<ResponseField name="relations" type="array">
+  Array of relation objects.
+</ResponseField>
+
+```json 200 OK
+{
+  "relations": [
+    {
+      "mal_id": 17074,
+      "name": "Cowboy Bebop: Tengoku no Tobira",
+      "relation": "Side Story",
+      "format": "Movie",
+      "year": 2001,
+      "episode_count": 1,
+      "source": "jikan"
+    }
+  ]
+}
+```
+
+**Relation object fields**
+
+<ResponseField name="mal_id" type="integer">
+  MAL ID of the related title.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Title of the related entry.
+</ResponseField>
+
+<ResponseField name="relation" type="string">
+  Relation type (e.g. `Sequel`, `Prequel`, `Side Story`, `Summary`, `Self`).
+</ResponseField>
+
+<ResponseField name="format" type="string | null">
+  Media format (e.g. `TV`, `Movie`, `OVA`).
+</ResponseField>
+
+<ResponseField name="year" type="integer | null">
+  Release year.
+</ResponseField>
+
+<ResponseField name="episode_count" type="integer | null">
+  Known episode count of the related entry.
+</ResponseField>
+
+<ResponseField name="source" type="string | null">
+  Which upstream provider supplied this relation (`jikan` or `anilist`).
+</ResponseField>
+
+---
+
+### Alternative titles
+
+<ParamField path="GET /api/anime/alttitles/:anilist_id" />
+
+Returns all known alternative titles for an anime via its AniList ID (romaji, English, native, and synonyms). Cached for **24 hours**.
+
+<ParamField path="anilist_id" type="integer" required>
+  AniList anime ID.
+</ParamField>
+
+<ResponseField name="titles" type="array of strings">
+  Deduplicated list of all known titles.
+</ResponseField>
+
+```json 200 OK
+{
+  "titles": [
+    "Cowboy Bebop",
+    "カウボーイビバップ"
+  ]
+}
+```
+
+---
+
+### Identity-based episode list
+
+<ParamField path="GET /api/anime/episodes" />
+
+Resolves an anime by AniList or MAL ID and returns the same episode data as `GET /api/anime/episodes/:mal_id`. Prefer passing `mal_id` directly when available to skip the identity resolution step.
+
+<ParamField query="mal_id" type="integer">
+  MAL ID. Bypasses identity resolution when provided.
+</ParamField>
+
+<ParamField query="anilist_id" type="integer">
+  AniList ID. Triggers identity resolution to obtain the MAL ID before fetching episodes.
+</ParamField>
+
+```http
+GET /api/anime/episodes?anilist_id=1
+GET /api/anime/episodes?mal_id=1735
+```
+
+Returns the same shape as `GET /api/anime/episodes/:mal_id`. Returns `{"count": 0, "episodes": []}` if neither ID is provided or the identity cannot be resolved.
+
+---
+
+### Resolve identity
+
+<ParamField path="POST /api/anime/identity/resolve" />
+
+Cross-references any combination of provider IDs (or a title) to produce a unified identity record with IDs across all known databases. Results are cached for **24 hours**.
+
+The resolver queries Anikoto, AniList, and Jikan in parallel, then enriches the result through Kitsu mappings. Title-based search falls back to AniList search followed by Kitsu when needed.
+
+<ParamField body="anilist_id" type="integer">
+  AniList ID.
+</ParamField>
+
+<ParamField body="mal_id" type="integer">
+  MyAnimeList ID.
+</ParamField>
+
+<ParamField body="anikoto_episode_id" type="string">
+  Anikoto episode ID string.
+</ParamField>
+
+<ParamField body="ids" type="object">
+  Object with any combination of provider ID fields: `anilist`, `mal`, `anidb`, `kitsu`, `tmdb`, `tmdbSeason`, `imdb`, `tvdb`, `tvdbSeason`, `animePlanet`, `liveChart`, `animeNewsNetwork`, `aniSearch`, `simkl`, `animeCountdown`, `anikoto`, `anikotoEpisode`.
+</ParamField>
+
+<ParamField body="title" type="string">
+  Title string for search-based resolution when no IDs are provided.
+</ParamField>
+
+<ParamField body="year" type="integer">
+  Release year, used to disambiguate title searches.
+</ParamField>
+
+<ParamField body="format" type="string">
+  Media format (e.g. `TV`, `Movie`), used to disambiguate title searches.
+</ParamField>
+
+<ResponseField name="ids" type="object">
+  All resolved provider IDs. Fields are strings or `null`.
+</ResponseField>
+
+<ResponseField name="titles" type="array of strings">
+  All known titles collected across providers.
+</ResponseField>
+
+<ResponseField name="episodes" type="integer | null">
+  Total episode count if known.
+</ResponseField>
+
+<ResponseField name="year" type="integer | null">
+  Release year.
+</ResponseField>
+
+<ResponseField name="season" type="string | null">
+  Broadcast season (e.g. `SPRING`, `FALL`).
+</ResponseField>
+
+<ResponseField name="format" type="string | null">
+  Media format.
+</ResponseField>
+
+<ResponseField name="mappingConfidence" type="string | null">
+  How the identity was resolved: `direct` (ID lookup), `title` (search match), or `mapped` (cross-database mapping).
+</ResponseField>
+
+<ResponseField name="mappingSources" type="array of strings">
+  Which upstream providers contributed to the result.
+</ResponseField>
+
+<ResponseField name="mappingWarnings" type="array of strings">
+  Non-fatal issues encountered during resolution (e.g. ambiguous title match).
+</ResponseField>
+
+<CodeGroup>
+```json Request
+{
+  "anilist_id": 1,
+  "mal_id": 1735
+}
+```
+
+```json 200 OK
+{
+  "ids": {
+    "anilist": "1",
+    "mal": "1735",
+    "anidb": "23",
+    "kitsu": "...",
+    "tmdb": null,
+    "imdb": null,
+    "tvdb": null,
+    "anikoto": null,
+    "anikotoEpisode": null
+  },
+  "titles": ["Cowboy Bebop", "カウボーイビバップ"],
+  "episodes": 26,
+  "year": 1998,
+  "season": "SPRING",
+  "format": "TV",
+  "mappingConfidence": "direct",
+  "mappingSources": ["anilist", "jikan", "kitsu"],
+  "mappingWarnings": []
+}
+```
+
+```json 404 Not Found
+{
+  "error": "anime identity could not be resolved... /ᐠ - ˕ -マ",
+  "ids": { "anilist": null, "mal": null }
+}
+```
+</CodeGroup>
+
+---
+
+### Resolve stream URL
+
+<ParamField path="POST /api/anime/resolve-stream" />
+
+Generates a Mochi-compatible stream URL for the Anikoto provider. Does not make upstream network calls — the URL is assembled from the provided IDs.
+
+<ParamField body="anilist_id" type="integer">
+  AniList ID of the anime.
+</ParamField>
+
+<ParamField body="mal_id" type="integer">
+  MAL ID of the anime.
+</ParamField>
+
+<ParamField body="anikoto_episode_id" type="string">
+  Direct Anikoto episode ID. Bypasses ID normalization when provided.
+</ParamField>
+
+<ParamField body="episode" type="integer" required>
+  Episode number. Must be greater than 0 unless `anikoto_episode_id` is provided.
+</ParamField>
+
+<ParamField body="language" type="string">
+  `"sub"` (default) or `"dub"`.
+</ParamField>
+
+<ResponseField name="source" type="string">
+  Always `"anikoto"`.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Always `"ready"` — stream URL construction is synchronous.
+</ResponseField>
+
+<ResponseField name="mochi_url" type="string">
+  Path to pass to the Lyra HLS player via Mochi (e.g. `/stream/anikoto?anilist_id=1&episode=1&language=sub`).
+</ResponseField>
+
+<CodeGroup>
+```json Request
+{
+  "anilist_id": 1,
+  "episode": 1,
+  "language": "sub"
+}
+```
+
+```json 200 OK
+{
+  "source": "anikoto",
+  "status": "ready",
+  "mochi_url": "/stream/anikoto?anilist_id=1&episode=1&language=sub"
+}
+```
+
+```json 422 Unprocessable Entity
+{
+  "error": "language must be sub or dub... /ᐠ - ˕ -マ"
+}
+```
+</CodeGroup>
+
+---
+
+## Metrics
+
+<ParamField path="GET /api/anime/metrics" />
+
+Returns the current state of the adaptive upstream gate and the per-cache entry counts. No authentication required.
+
+```json 200 OK
+{
+  "upstream": {
+    "active": 2,
+    "limit": 16,
+    "minimum": 1,
+    "maximum": 64,
+    "peak": 5,
+    "waits": 0,
+    "rejected": 0
+  },
+  "cache": {
+    "episodes": 120,
+    "relations": 45,
+    "titles": 300,
+    "identity": 200,
+    "failures": 2
+  }
+}
+```
+
+<ResponseField name="upstream.active" type="integer">
+  Upstream requests currently in flight.
+</ResponseField>
+
+<ResponseField name="upstream.limit" type="integer">
+  Current adaptive concurrency limit.
+</ResponseField>
+
+<ResponseField name="upstream.peak" type="integer">
+  Maximum concurrency observed since startup.
+</ResponseField>
+
+<ResponseField name="upstream.rejected" type="integer">
+  Requests dropped because the gate was saturated.
+</ResponseField>
+
+<ResponseField name="cache.episodes" type="integer">
+  Number of cached episode payloads (10-minute TTL).
+</ResponseField>
+
+<ResponseField name="cache.relations" type="integer">
+  Number of cached relation lists (30-minute TTL).
+</ResponseField>
+
+<ResponseField name="cache.titles" type="integer">
+  Number of cached alternative title lists (24-hour TTL).
+</ResponseField>
+
+<ResponseField name="cache.identity" type="integer">
+  Number of cached identity records (24-hour TTL).
+</ResponseField>
+
+<ResponseField name="cache.failures" type="integer">
+  Number of active negative-cache entries (15-second TTL).
+</ResponseField>
+
+---
+
+## Health check
+
+`GET /health` returns `200 oki` when the service is running.

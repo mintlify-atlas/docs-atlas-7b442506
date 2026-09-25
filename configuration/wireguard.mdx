@@ -1,0 +1,113 @@
+---
+title: 'Route Proxy Traffic Through WireGuard VPN'
+sidebarTitle: 'WireGuard'
+description: 'How to configure optional WireGuard VPN routing for Mochi and Nuru in Lyra, isolating outbound proxy traffic from the host network.'
+---
+
+Lyra supports optional WireGuard VPN routing for its two proxy services, Mochi and Nuru. When enabled, all outbound connections made by those services travel through a `wg0` WireGuard interface instead of the host's default network path. The host machine's own traffic — including SSH, Caddy, CloudSync, and Isao — is completely unaffected.
+
+## How It Works
+
+WireGuard routing in Lyra is implemented with Linux policy routing rather than the default WireGuard table-management behaviour.
+
+1. **System users** — `setup.sh` creates dedicated `mochi` and `nuru` system users. Every process in those services runs under one of these UIDs.
+
+2. **Policy routing rules** — Two `ip rule` entries (priorities 1000 and 1001) direct packets originating from those UIDs to routing table 200:
+
+   ```
+   1000: from all uidrange <nuru-uid>-<nuru-uid> lookup 200
+   1001: from all uidrange <mochi-uid>-<mochi-uid> lookup 200
+   ```
+
+3. **Routing table 200** — Contains a single default route via `wg0`. All Mochi/Nuru traffic therefore exits through the VPN tunnel.
+
+4. **fwmark bypass** — WireGuard itself sets an `FwMark` on packets it generates (the VPN keepalive and handshake traffic). A higher-priority rule (priority 500) sends fwmark'd packets back to the `main` table so they route via the physical interface, preventing a routing loop:
+
+   ```
+   500: from all fwmark <wg-fwmark> lookup main
+   ```
+
+5. **DNS** — Any `DNS =` lines in the WireGuard config are commented out (prefixed `# LyraVPNDNS`) during install so the host resolver is unchanged. Nuru uses its own `dns_servers` setting in `config.toml` (see [Nuru Config](/configuration/nuru-config)); `setup.sh` injects the VPN DNS servers into that list automatically.
+
+6. **Maintenance timer** — A `nuru-route.timer` systemd timer fires at boot (after 30 seconds) and then every 60 seconds, running `/usr/local/bin/nuru-route.sh` to re-apply routing rules in case the interface restarted or the server rebooted.
+
+## Interactive Setup
+
+Run `setup.sh` from a terminal. When prompted, type `y` to enable WireGuard:
+
+```bash
+bash setup.sh
+# [setup] route mochi and nuru through a wireguard vpn?
+# [setup] all outbound traffic from both services will use the vpn and may be slower
+# > y
+```
+
+If `/etc/wireguard/wg0.conf` already exists, you will be asked whether to keep (`k`) or replace (`r`) it.
+
+If you choose to configure a new tunnel, `nano` opens with a template comment block. Paste your WireGuard config, then save and exit (`Ctrl+X`, `Y`, `Enter`):
+
+```ini
+[Interface]
+PrivateKey = <your-private-key>
+Address = 10.8.0.2/32
+DNS = 10.8.0.1
+
+[Peer]
+PublicKey = <server-public-key>
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.com:51820
+PresharedKey = <optional-preshared-key>
+```
+
+<Note>
+  IPv6 addresses in `AllowedIPs` are stripped automatically during install because the Lyra host sysctl disables IPv6. The host's DNS is left unchanged regardless of the `DNS =` field in your config.
+</Note>
+
+## Non-Interactive Setup
+
+For CI pipelines or automated provisioning, pre-install your WireGuard config and set `LYRA_WIREGUARD=yes` before running `setup.sh`:
+
+```bash
+# 1. Install your config (must already exist)
+sudo install -m 600 /path/to/wg0.conf /etc/wireguard/wg0.conf
+
+# 2. Run setup non-interactively
+LYRA_WIREGUARD=yes bash setup.sh
+```
+
+`setup.sh` accepts the following values for `LYRA_WIREGUARD`: `yes`, `y`, `1`, `true`. Any other value (including unset) uses the host's direct connection.
+
+<Warning>
+  `LYRA_WIREGUARD=yes` requires `/etc/wireguard/wg0.conf` to exist before setup runs. If the file is missing, setup prints a warning and continues without VPN routing.
+</Warning>
+
+## MTU Calculation
+
+When `setup.sh` installs a new config it calculates a safe MTU automatically:
+
+```
+MTU = physical_interface_MTU - 80
+```
+
+The result is clamped to a minimum of **1280** (the IPv6 minimum and a safe floor for WireGuard). The calculated value is written as an `MTU =` line under `[Interface]`. If you are reusing an existing config (`k` / `WG_REUSE=1`), the MTU is not modified.
+
+## Disabling WireGuard After Setup
+
+Re-run `setup.sh` and choose `n` when asked about WireGuard routing. Setup will:
+
+- Stop and disable `wg-quick@wg0.service`
+- Stop and disable `nuru-route.timer` and `nuru-route.service`
+- Remove `/usr/local/bin/nuru-route.sh` and the associated systemd units
+- Delete the UID-range policy routing rules for the `mochi` and `nuru` users
+
+The `/etc/wireguard/wg0.conf` file is left in place in case you want to re-enable routing later.
+
+## Systemd Units
+
+| Unit | Purpose |
+|---|---|
+| `wg-quick@wg0.service` | Brings up the `wg0` WireGuard interface on boot |
+| `nuru-route.service` | One-shot service that runs `nuru-route.sh` (invoked by the timer) |
+| `nuru-route.timer` | Fires `nuru-route.service` 30 s after boot and every 60 s thereafter |
+
+The `nuru@N.service` and `mochi@N.service` units both declare `After=wg-quick@wg0.service` and run `nuru-route.sh` as an `ExecStartPre` step when WireGuard is active, ensuring routing is applied before any proxy connection is accepted.

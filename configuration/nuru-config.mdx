@@ -1,0 +1,286 @@
+---
+title: 'Nuru TOML Configuration Reference'
+sidebarTitle: 'Nuru Config'
+description: 'Complete reference for Nuru's config.toml: server bind, transport, Wisp protocol settings, stream options, DNS, and host/port access control lists.'
+---
+
+Nuru is Lyra's WebSocket proxy service, implementing the [Wisp protocol](https://github.com/MercuryWorkshop/wisp-protocol). Its behaviour is driven entirely by a TOML file — one copy per instance — installed to `/etc/nuru/config-N.toml` by `setup.sh`. The source template at `services/nuru/config.toml` is patched at deploy time: the `[wisp] prefix` is replaced with a random 64-character hex path, and `websocket_origin_scheme = "https"` is injected under `[server]`.
+
+## Default `config.toml`
+
+```toml config.toml
+[server]
+bind = ["tcp", "127.0.0.1:4001"]
+transport = "websocket"
+resolve_ipv6 = false
+tcp_nodelay = true
+file_raw_mode = false
+use_real_ip_headers = true
+non_ws_response = "hii you should join discord.gg/4GeWaGPh6c :3!!"
+log_level = "WARN"
+runtime = "threadpercore"
+
+[wisp]
+allow_wsproxy = true
+prefix = "/w"
+wisp_v2 = true
+extensions = ["udp", "motd"]
+password_extension_required = false
+certificate_extension_required = false
+ping_interval_secs = 15
+resolve_cache_ttl_secs = 300
+
+[stream]
+tcp_nodelay = true
+resolve_timeout_ms = 5000
+connect_timeout_ms = 8000
+allow_udp = true
+allow_wsproxy_udp = true
+dns_servers = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]
+allow_direct_ip = true
+allow_loopback = true
+allow_multicast = true
+allow_global = true
+allow_non_global = true
+allow_tcp_hosts = []
+block_tcp_hosts = []
+allow_udp_hosts = []
+block_udp_hosts = []
+allow_hosts = []
+block_hosts = []
+allow_ports = []
+block_ports = []
+```
+
+<Note>
+  `setup.sh` overwrites `prefix` with a random hex path (e.g. `/a3f8…c2/`) and appends `websocket_origin_scheme = "https"` on every deploy. The per-instance files at `/etc/nuru/config-N.toml` also have `bind` rewritten to `127.0.0.1:420N`.
+</Note>
+
+---
+
+## `[server]`
+
+Controls the listening socket, wire transport, and process runtime.
+
+<ParamField body="bind" type="[string, string]" default='["tcp", "127.0.0.1:4001"]'>
+  A two-element array: socket type and address. Socket type may be `tcp`, `tlstcp`, `unix`, or `tlsunix`. For `tcp`/`tlstcp` the address is `host:port`; for Unix sockets it is a filesystem path.
+  `setup.sh` overwrites this to `["tcp", "127.0.0.1:420N"]` for instance N.
+</ParamField>
+
+<ParamField body="transport" type="string" default="websocket">
+  Wire framing used by Nuru clients. `websocket` is the standard choice for browser clients. The alternative `lengthdelimitedlc` is a raw length-prefixed framing suitable for native clients.
+</ParamField>
+
+<ParamField body="resolve_ipv6" type="boolean" default="false">
+  When `true`, DNS resolution may return AAAA records and Nuru will attempt IPv6 connections to upstream hosts. Disabled by default because the system-level sysctl in `99-lyra-optimizations.conf` disables IPv6 on the host.
+</ParamField>
+
+<ParamField body="tcp_nodelay" type="boolean" default="true">
+  Enables `TCP_NODELAY` on the listening socket, disabling Nagle's algorithm to reduce latency for small writes.
+</ParamField>
+
+<ParamField body="file_raw_mode" type="boolean" default="false">
+  Enables raw (non-HTTP-upgraded) file-socket mode. Not needed for standard WebSocket deployments.
+</ParamField>
+
+<ParamField body="use_real_ip_headers" type="boolean" default="true">
+  When `true`, Nuru reads `X-Real-IP` (set by Caddy) to obtain the real client address instead of the loopback address of the reverse proxy.
+</ParamField>
+
+<ParamField body="websocket_origin_scheme" type="string">
+  Expected origin scheme for WebSocket upgrade requests. Injected as `"https"` by `setup.sh` to reject plain-HTTP upgrade attempts. Absent from the template — do not add it manually.
+</ParamField>
+
+<ParamField body="non_ws_response" type="string" default='"hii you should join discord.gg/4GeWaGPh6c :3!!"'>
+  Plain-text body returned to HTTP clients that do not send a WebSocket upgrade header. Shown in browsers that navigate to the Nuru port directly.
+</ParamField>
+
+<ParamField body="max_message_size" type="number">
+  Maximum WebSocket message size in bytes. Defaults to a tuned value calculated from available memory by `tuning.rs`. Not present in the default config file; set it explicitly to override.
+</ParamField>
+
+<ParamField body="log_level" type="string" default="WARN">
+  Logging verbosity. Accepted values: `OFF`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`. The systemd unit also sets `RUST_LOG=off`, which overrides this for the `tracing` subscriber; `log_level` controls Nuru's own internal log filter.
+</ParamField>
+
+<ParamField body="runtime" type="string" default="threadpercore">
+  Tokio runtime flavour. `threadpercore` (alias `thread_per_core`) spawns one independent single-threaded runtime per logical CPU, maximising cache locality. Other options: `singlethread`, `multithread`.
+</ParamField>
+
+<ParamField body="tls_keypair" type="[string, string]">
+  Paths to a PEM certificate and private key file for TLS termination inside Nuru. Not required when Caddy handles TLS (the default).
+</ParamField>
+
+<ParamField body="stats_endpoint" type="string | [string, string]">
+  Expose a Prometheus-compatible stats endpoint. Provide a path string to serve it on the main socket, or a `[type, address]` bind pair to serve it on a separate socket.
+</ParamField>
+
+---
+
+## `[wisp]`
+
+Configures the Wisp protocol layer that multiplexes streams over a single WebSocket connection.
+
+<ParamField body="prefix" type="string" default='"/w"'>
+  HTTP path prefix where Nuru accepts Wisp upgrades. `setup.sh` replaces this with a random 64-hex-character path (e.g. `/3a9f…b1`) for security through obscurity — the path is baked into the client bundle at build time.
+</ParamField>
+
+<ParamField body="allow_wsproxy" type="boolean" default="true">
+  Also accept the legacy Wsproxy protocol (single WebSocket per connection) on the same prefix, in addition to the multiplexed Wisp protocol.
+</ParamField>
+
+<ParamField body="wisp_v2" type="boolean" default="true">
+  Advertise and use the Wisp v2 handshake, which supports protocol extensions. Disabling this drops extension support and falls back to Wisp v1.
+</ParamField>
+
+<ParamField body="extensions" type="string[]" default='["udp", "motd"]'>
+  List of Wisp v2 extensions to advertise. Supported values:
+  - `udp` — allows UDP streams through the proxy
+  - `motd` — sends a message-of-the-day string during handshake
+  - `wispnet` — enables WispNet federation (advanced)
+</ParamField>
+
+<ParamField body="auth_extension" type="string">
+  Authentication extension type. Set to `"password"` to require username/password credentials, or `"certificate"` to require a client certificate. Omit to allow unauthenticated connections (the default for Lyra).
+</ParamField>
+
+<ParamField body="password_extension_required" type="boolean" default="false">
+  When `auth_extension = "password"`, determines whether clients that do not send a password are rejected. Set to `false` so Lyra does not require credentials from users.
+</ParamField>
+
+<ParamField body="password_extension_users" type="object">
+  Map of `username → password` pairs for the password extension. Empty by default.
+</ParamField>
+
+<ParamField body="certificate_extension_required" type="boolean" default="false">
+  When `auth_extension = "certificate"`, determines whether clients without a valid certificate are rejected.
+</ParamField>
+
+<ParamField body="certificate_extension_keys" type="string[]">
+  List of paths to PEM public-key files trusted for certificate-based authentication.
+</ParamField>
+
+<ParamField body="buffer_size" type="number">
+  Per-stream flow-control window size in bytes. Computed by `tuning.rs` based on available memory; not set in the default config file.
+</ParamField>
+
+<ParamField body="ping_interval_secs" type="number" default="15">
+  Interval in seconds between WebSocket ping frames. Keeps connections alive through proxies and NAT devices that time out idle TCP connections.
+</ParamField>
+
+<ParamField body="resolve_cache_ttl_secs" type="number" default="300">
+  How long (in seconds) DNS resolution results are cached inside Nuru before a fresh lookup is made. Reduces DNS traffic for frequently-accessed hosts.
+</ParamField>
+
+<ParamField body="resolve_cache_max_entries" type="number">
+  Maximum number of entries in the DNS resolution cache. Defaults to a value calculated by `tuning.rs` from available memory.
+</ParamField>
+
+<ParamField body="motd_extension" type="string">
+  The message-of-the-day string sent to clients during Wisp v2 handshake when the `motd` extension is active. Defaults to `nuru (git <sha>, ...)`.
+</ParamField>
+
+---
+
+## `[stream]`
+
+Controls how Nuru opens and manages individual proxied TCP/UDP streams.
+
+<ParamField body="tcp_nodelay" type="boolean" default="true">
+  Enables `TCP_NODELAY` on proxied stream sockets, disabling Nagle's algorithm to reduce latency.
+</ParamField>
+
+<ParamField body="buffer_size" type="number">
+  Internal read/write buffer size per stream in bytes. Auto-tuned by `tuning.rs`; not present in the default config.
+</ParamField>
+
+<ParamField body="resolve_timeout_ms" type="number" default="5000">
+  DNS resolution timeout in milliseconds. If a hostname cannot be resolved within this window the stream is aborted.
+</ParamField>
+
+<ParamField body="connect_timeout_ms" type="number" default="8000">
+  TCP connection timeout in milliseconds. The stream is aborted if the upstream host does not complete the handshake within this window.
+</ParamField>
+
+<ParamField body="allow_udp" type="boolean" default="true">
+  Permit UDP streams via the Wisp `udp` extension.
+</ParamField>
+
+<ParamField body="allow_wsproxy_udp" type="boolean" default="true">
+  Permit UDP streams through the legacy WsprProxy protocol (requires `allow_wsproxy = true`).
+</ParamField>
+
+<ParamField body="dns_servers" type="string[]" default='["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]'>
+  Explicit DNS resolvers used by Nuru for all stream hostname lookups, bypassing the system resolver. When WireGuard is enabled, `setup.sh` replaces this list with the DNS servers from the WireGuard config.
+</ParamField>
+
+### Address Filtering
+
+Allow/block lists accept **regular expressions**. An empty allow list means all hosts are allowed (subject to block lists). Block lists take precedence over allow lists when both match.
+
+<ParamField body="allow_direct_ip" type="boolean" default="true">
+  Permit connections to bare IP addresses (i.e. targets that are IPs rather than hostnames).
+</ParamField>
+
+<ParamField body="allow_loopback" type="boolean" default="true">
+  Permit connections to loopback addresses (`127.0.0.0/8`, `::1`).
+</ParamField>
+
+<ParamField body="allow_multicast" type="boolean" default="true">
+  Permit connections to multicast address ranges.
+</ParamField>
+
+<ParamField body="allow_global" type="boolean" default="true">
+  Permit connections to globally routable unicast addresses.
+</ParamField>
+
+<ParamField body="allow_non_global" type="boolean" default="true">
+  Permit connections to non-globally-routable addresses (RFC 1918 private ranges, link-local, etc.).
+</ParamField>
+
+<ParamField body="allow_tcp_hosts" type="string[]" default="[]">
+  Regex allowlist applied only to TCP stream destinations. If non-empty, only matching hostnames/IPs are permitted for TCP.
+</ParamField>
+
+<ParamField body="block_tcp_hosts" type="string[]" default="[]">
+  Regex blocklist applied only to TCP stream destinations.
+</ParamField>
+
+<ParamField body="allow_udp_hosts" type="string[]" default="[]">
+  Regex allowlist applied only to UDP stream destinations.
+</ParamField>
+
+<ParamField body="block_udp_hosts" type="string[]" default="[]">
+  Regex blocklist applied only to UDP stream destinations.
+</ParamField>
+
+<ParamField body="allow_hosts" type="string[]" default="[]">
+  Regex allowlist applied to both TCP and UDP stream destinations.
+</ParamField>
+
+<ParamField body="block_hosts" type="string[]" default="[]">
+  Regex blocklist applied to both TCP and UDP stream destinations. Example: `["^10\\.0\\.0\\.1$"]`.
+</ParamField>
+
+<ParamField body="allow_ports" type="number[][]" default="[]">
+  List of inclusive port ranges `[[min, max], …]` to permit. An empty list allows all ports (subject to `block_ports`).
+</ParamField>
+
+<ParamField body="block_ports" type="number[][]" default="[]">
+  List of inclusive port ranges `[[min, max], …]` to block. Example: `[[25, 25], [465, 465]]` to block SMTP.
+</ParamField>
+
+---
+
+## Deploy-Time Modifications
+
+When `setup.sh` installs configs it applies the following patches to the source `config.toml` before copying to `/etc/nuru/`:
+
+| Field | Change |
+|---|---|
+| `[server] websocket_origin_scheme` | Injected as `"https"` |
+| `[wisp] prefix` | Replaced with random 64-hex-char path |
+| `[stream] dns_servers` | Replaced with VPN DNS servers (WireGuard mode only) |
+| `[server] bind` | Rewritten per-instance to `127.0.0.1:420N` |
+
+The final installed configs are owned by the `nuru` system user (`chown -R nuru:nuru /etc/nuru`).

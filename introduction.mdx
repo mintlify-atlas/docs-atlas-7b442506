@@ -1,0 +1,55 @@
+---
+title: "Lyra: Self-Hosted Web Proxy with Streaming & Games"
+sidebarTitle: "Introduction"
+description: "Lyra is a self-hosted web proxy offering free anime streaming, a browser games library, cloud sync, tab cloaking, and Chrome extension support."
+---
+
+Lyra is a privacy-first, self-hosted web proxy designed to give you full control over your browsing infrastructure. Rather than routing your traffic through a shared third-party service, you deploy Lyra on your own server — getting a polished UI, thousands of aggregated browser games, free anime streaming, cloud-synced settings, and even functional Chrome extension support, all under the AGPL-3.0 license.
+
+## What Lyra Gives You
+
+<CardGroup cols={2}>
+  <Card title="Web Proxy" icon="globe" href="/features/proxy">
+    Route arbitrary web traffic through your server with Mochi (Rust reverse proxy) and Folio (service-worker rewriter). Private by design — no shared infrastructure.
+  </Card>
+  <Card title="Anime Streaming" icon="film" href="/features/anime">
+    Stream anime for free directly from the Lyra UI. Powered by the Isao metadata service and Mochi's built-in stream cache with configurable retention.
+  </Card>
+  <Card title="Browser Games" icon="gamepad" href="/features/games">
+    Thousands of games aggregated from multiple community sources including Selenite, Velara, Truffled, wasm.rip, and more — all accessible through one library.
+  </Card>
+  <Card title="Cloud Sync" icon="cloud" href="/features/cloud-sync">
+    Persist bookmarks, settings, and history across devices using the CloudSync Rust service. Secrets are auto-generated and stored securely in your deployment's `.env`.
+  </Card>
+  <Card title="Tab Cloaking" icon="eye-slash" href="/features/cloaking">
+    Disguise the browser tab's title and favicon to any custom value, making Lyra blend into everyday browsing at a glance.
+  </Card>
+  <Card title="Chrome Extensions" icon="puzzle-piece" href="/features/extensions">
+    Run real Chrome extensions inside Lyra through Rivet, an extension runtime layer built on top of the Sapphire project.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+Lyra is composed of several focused services that work together behind a Caddy reverse proxy. Understanding the role of each component helps when scaling, debugging, or extending the platform.
+
+| Component | Language | Role |
+|---|---|---|
+| **Mochi** | Rust | High-performance reverse proxy and anime stream cache. Runs as multiple systemd-managed instances behind Caddy for load balancing. |
+| **Nuru** | Rust | Wisp-compatible WebSocket tunnel. Provides the low-latency connection path used by the Folio service worker in the browser. |
+| **Folio** | TypeScript / Rust (WASM) | Service-worker-based JavaScript rewriter. Rewrites page content client-side using a WASM engine compiled from Rust nightly. |
+| **Rivet** | TypeScript | Chrome extension runtime layer. Intercepts extension APIs and bridges them into the Lyra environment. |
+| **CloudSync** | Rust | Persistent sync service backed by SQLite. Handles auth, bookmarks, and settings sync across sessions and devices. |
+| **Isao** | Rust | Anime metadata and catalogue service. Powers the streaming library and search within the Lyra UI. |
+
+All public traffic enters through **Caddy** on ports 443/80, which terminates TLS (including on-demand TLS for custom domains), applies compression, and routes requests to the appropriate backend service. A separate **eturnal** TURN server (port 3478) handles WebRTC relay for video streaming.
+
+## License & Community
+
+Lyra is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. Any modifications you deploy over a network must be made available under the same terms.
+
+Join the community on Discord for support, announcements, and to connect with other self-hosters:
+
+<Card title="Lyra Discord" icon="discord" href="https://discord.gg/4GeWaGPh6c">
+  Get help, share your deployment, and follow development at **discord.gg/4GeWaGPh6c**
+</Card>

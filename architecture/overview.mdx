@@ -1,0 +1,140 @@
+---
+title: "Lyra Architecture: How Proxy, Tunnel, and Rewriter Fit Together"
+sidebarTitle: "Overview"
+description: "A high-level walkthrough of how Lyra's Mochi proxy, Nuru WebSocket tunnel, Folio service worker, and backend services interact to proxy web requests."
+---
+
+Lyra is a self-hosted web proxy built from several cooperating services. At the heart of it are three core runtime components — **Mochi** (Rust reverse proxy), **Nuru** (Rust WebSocket tunnel), and **Folio** (TypeScript + WASM service worker) — all sitting behind a **Caddy** reverse proxy that handles TLS termination and load balancing. Understanding how these pieces hand off work to each other is the foundation for operating, debugging, and extending Lyra.
+
+## Request Flow
+
+Lyra handles two distinct types of traffic: standard HTTP/S web requests routed through the service worker and Mochi, and WebSocket/TCP tunneling routed through Nuru.
+
+### Web Requests (HTTP/HTTPS)
+
+```
+Browser
+  │
+  ▼
+Caddy (443/80) ── TLS termination, routing
+  │
+  ▼
+Lyra Frontend (Node.js, :4444)
+  │
+  ▼
+Folio Service Worker (in-browser, /b/ path)
+  │  intercepts all fetch/XHR/WebSocket calls from proxied pages
+  ▼
+Caddy Load Balancer (:4000) ── distributes across Mochi workers
+  │
+  ▼
+Mochi Worker (:4100+i) ── reverse proxy, caching, rewriting
+  │
+  ▼
+Origin Server (public internet)
+```
+
+When a user navigates to a proxied URL, Folio's service worker intercepts the `fetch` event, encodes the target URL into a Mochi-routable path, and forwards the request to Mochi. Mochi fetches the resource from the origin, rewrites HTML and CSS responses to proxy all embedded URLs, and returns the result. Static assets are served from Mochi's multi-tier cache on subsequent requests.
+
+### WebSocket / TCP Tunneling
+
+```
+Browser
+  │
+  ▼
+Caddy (:443) ── WebSocket upgrade
+  │
+  ▼
+Caddy Load Balancer (:4001) ── distributes across Nuru workers
+  │
+  ▼
+Nuru Worker (:4200+i) ── Wisp v2 server
+  │
+  ▼
+TCP/UDP destination (public internet)
+```
+
+For WebSocket connections and direct TCP/UDP tunneling, the browser connects to Nuru using the [Wisp v2 protocol](https://github.com/MercuryWorkshop/wisp-protocol). Nuru multiplexes any number of streams over a single WebSocket connection, forwarding each to its TCP or UDP destination.
+
+## Component Summary
+
+<CardGroup cols={2}>
+  <Card title="Folio" icon="browser">
+    TypeScript + Rust/WASM service worker that intercepts all browser requests from proxied pages and rewrites JavaScript, HTML, CSS, and URLs.
+  </Card>
+  <Card title="Mochi" icon="server">
+    Rust (Axum) reverse proxy with a multi-tier cache (Moka RAM + disk), HTML/CSS/JS rewriting, and adaptive concurrency gating.
+  </Card>
+  <Card title="Nuru" icon="arrow-right-arrow-left">
+    Rust Wisp v2 WebSocket tunnel server for TCP/UDP proxying. Uses a thread-per-core runtime for maximum throughput.
+  </Card>
+  <Card title="Rivet" icon="puzzle-piece">
+    TypeScript in-browser Chrome extension emulation layer.
+  </Card>
+  <Card title="CloudSync" icon="cloud">
+    Rust (Axum) service providing encrypted settings and bookmark synchronisation across devices.
+  </Card>
+  <Card title="Isao" icon="database">
+    Rust (Axum) anime metadata aggregator that fans out requests to Jikan and AniList.
+  </Card>
+  <Card title="tls-approval" icon="lock">
+    Node.js service that approves on-demand TLS certificate issuance for Caddy's ACME solver.
+  </Card>
+  <Card title="eturnal" icon="signal">
+    STUN/TURN server for WebRTC relay on port 3478.
+  </Card>
+</CardGroup>
+
+### Full Component Table
+
+| Component | Language | Role |
+|---|---|---|
+| Folio | TypeScript + Rust WASM | Service worker request interceptor and JS/HTML/CSS rewriter |
+| Mochi | Rust (Axum) | Reverse proxy with caching, rewriting, and stream handling |
+| Nuru | Rust | Wisp v2 WebSocket TCP/UDP tunnel server |
+| Rivet | TypeScript | In-browser Chrome extension emulation |
+| CloudSync | Rust (Axum) | Encrypted settings and bookmark sync |
+| Isao | Rust (Axum) | Anime metadata aggregator (Jikan + AniList) |
+| tls-approval | Node.js | On-demand TLS certificate approval for Caddy |
+
+## Port Layout
+
+All services bind on localhost and are exposed only through Caddy's reverse proxy. Do not expose these ports directly to the internet.
+
+<AccordionGroup>
+  <Accordion title="Public-facing ports (Caddy)">
+    | Port | Service | Notes |
+    |---|---|---|
+    | `443` | Caddy | Public HTTPS/WSS (TLS termination) |
+    | `80` | Caddy | HTTP redirect to HTTPS |
+  </Accordion>
+  <Accordion title="Internal application ports">
+    | Port | Service | Notes |
+    |---|---|---|
+    | `4444` | Lyra frontend | Node.js application server |
+    | `4000` | Caddy → Mochi | Load balancer entry point for proxy traffic |
+    | `4100+i` | Mochi instances | Individual workers (`4100`, `4101`, …) |
+    | `4001` | Caddy → Nuru | Load balancer entry point for tunnel traffic |
+    | `4200+i` | Nuru instances | Individual workers (`4200`, `4201`, …) |
+    | `4005` | CloudSync | Settings/bookmark sync API |
+    | `6001` | Isao | Anime metadata API |
+    | `3001` | tls-approval | Caddy ACME certificate hook |
+    | `3478` | eturnal | STUN/TURN for WebRTC |
+  </Accordion>
+</AccordionGroup>
+
+## Adaptive Capacity
+
+All Rust services — Mochi and Nuru — share the `adaptive-capacity` crate. Instead of static thread pools or fixed connection limits, every service uses **`AdaptiveGate`** semaphores whose limits are continuously rebalanced by a background task.
+
+Every 2 seconds, the rebalancer reads available RAM from `/proc/meminfo` and the system one-minute load average, then adjusts each gate's permit limit upward or downward within pre-computed min/max bounds:
+
+- **Memory pressure** — if available RAM shrinks, permit limits are reduced so in-flight work doesn't exhaust memory.
+- **CPU load** — gates classified as `Workload::Cpu` or `Workload::Mixed` also factor in normalized CPU load, while `Workload::Io` gates are bounded only by memory.
+- **Graduated growth** — limits can be cut immediately but grow only by one quarter of the gap per tick, preventing oscillation.
+
+<Info>
+  You can observe the current gate state for Mochi at any time by calling `GET /metrics` on any Mochi worker. The response includes `capacity.active`, `capacity.limit`, `capacity.minimum`, `capacity.maximum`, `capacity.peak`, `capacity.waits`, and `capacity.rejected` fields for the main request gate.
+</Info>
+
+This design means Lyra automatically uses more of your server when load is light and backs off gracefully under memory pressure — without operator intervention and without requiring manual tuning of concurrency knobs for each deployment size.

@@ -1,0 +1,160 @@
+---
+title: 'TLS Approval Service for On-Demand Certificates'
+sidebarTitle: 'TLS Approval'
+description: "How Lyra's tls-approval Node.js service validates Caddy's on-demand TLS certificate requests, rejecting certificates for unauthorized hostnames."
+---
+
+The `tls-approval` service is a lightweight Node.js/Bun HTTP server that acts as the decision point for Caddy's [on-demand TLS](https://caddyserver.com/docs/automatic-https#on-demand-tls) feature. Before Caddy obtains a TLS certificate for any hostname, it sends an approval request to this service. `tls-approval` inspects the domain and returns HTTP `200` to allow or a non-`200` status to deny the certificate issuance. This prevents Caddy from being weaponised to issue certificates for arbitrary or abusive domains.
+
+## How it works
+
+```
+Browser → Caddy (TLS handshake for example.com)
+              ↓
+              GET http://127.0.0.1:3001/?domain=example.com
+              ↓
+         tls-approval
+              ↓
+         200 → Caddy proceeds to obtain certificate
+         non-200 → Caddy rejects the TLS handshake
+```
+
+Caddy passes the requested hostname as the `domain` query parameter (some versions use `server_name`). `tls-approval` reads both and uses whichever is present.
+
+## Deployment
+
+- **Runtime:** Bun (also compatible with Node.js)
+- **Port:** `3001` (hardcoded)
+- **Bind address:** `127.0.0.1` — only Caddy on the same host should call this service
+- **Process manager:** PM2 in production
+
+`tls-approval` is intentionally kept isolated from the public internet. It has no authentication, as network-level restriction to localhost is the security boundary.
+
+---
+
+## Approval logic
+
+A domain request passes through the following checks in order. The first failure returns immediately without caching (unless noted).
+
+### 1. Approval cache
+
+Approved domains are cached for **24 hours**. On a cache hit the service returns `200 yes` immediately without re-validating, avoiding redundant checks during the certificate's validity period.
+
+### 2. Denial cache
+
+Rejected domains are cached for **1 hour**. Cache hits return `410 no` without re-checking, protecting against repeated probing.
+
+### 3. Domain syntax validation
+
+The hostname must satisfy all of the following:
+
+- 1–253 characters
+- Contains at least one dot
+- Does not start or end with `.` or `-`
+- Each label is at most 63 characters
+- Contains only lowercase ASCII letters, digits, and hyphens
+- Is not a bare IPv4 address
+
+Invalid domains are denied with `400 invalid domain` and added to the denial cache for 1 hour.
+
+### 4. Blocked suffix check
+
+Domains matching a hardcoded blocklist of wildcard DNS services, tunnelling platforms, and SSRF/OAST canary domains are denied with `410 no` and cached for 1 hour.
+
+<Accordion title="Full blocked suffix list">
+
+| Suffix | Category |
+|---|---|
+| `.nip.io`, `.sslip.io`, `.xip.io`, `.xip.name` | Wildcard DNS |
+| `.localtest.me`, `.lvh.me`, `.vcap.me`, `.myaddr.io` | Loopback DNS |
+| `.backname.io`, `.redirectme.net`, `.wildcard.run` | Wildcard DNS |
+| `.duckdns.org`, `.freedns.afraid.org` | Dynamic DNS |
+| `.ngrok.io`, `.ngrok.app`, `.serveo.net`, `.localhost.run` | Tunnels |
+| `.tunnelmole.com`, `.loca.lt`, `.telebit.cloud` | Tunnels |
+| `.trycloudflare.com` | Tunnels |
+| `.burpcollaborator.net`, `.interact.sh` | OAST / pentest |
+| `.oast.fun`, `.oast.live`, `.oast.site`, `.oast.me`, `.oast.online`, `.oastify.com` | OAST |
+| `.canarytokens.com` | Canary tokens |
+| `.securly.cloud`, `.tiktokv.us` | Other |
+
+</Accordion>
+
+### 5. Global rate limit
+
+A sliding 60-second window caps total requests across all domains. The limit is `max(200, cores × 100)`. When exceeded, the service returns `503 temporarily unavailable` with a `Retry-After` header and does **not** update the denial cache, allowing Caddy to retry once the window resets.
+
+### 6. Per-domain rate limit
+
+Each domain is limited to **10 requests per 5-minute window**. Exceeding this triggers a **30-minute ban** for that domain, returning `429 domain temporarily banned`. The ban is logged with the domain name and request count.
+
+### 7. Approval
+
+Domains that pass all checks are approved: the domain is added to the approval cache for 24 hours and the service returns `200 yes`.
+
+---
+
+## Endpoints
+
+### Approval check
+
+```
+GET /?domain={hostname}
+GET /?server_name={hostname}
+```
+
+This is the endpoint Caddy calls. Both `domain` and `server_name` query parameters are accepted; `domain` takes precedence.
+
+| Response | Status | Meaning |
+|---|---|---|
+| `yes!! (˵◝ ⩊  ◜˵マ` | `200` | Domain approved; Caddy may issue a certificate |
+| `no... /ᐠ - ˕ -マ` | `410` | Domain denied (blocked suffix or denial cache hit) |
+| `missing domain... /ᐠ - ˕ -マ` | `400` | No domain parameter in the request |
+| `invalid domain... /ᐠ - ˕ -マ` | `400` | Domain failed syntax validation |
+| `domain temporarily banned... /ᐠ - ˕ -マ` | `429` | Per-domain rate limit exceeded |
+| `domain rate limited... /ᐠ - ˕ -マ` | `429` | Per-domain request limit hit (triggers ban) |
+| `temporarily unavailable... /ᐠ - ˕ -マ` | `503` | Global rate limit exceeded |
+
+### Health check
+
+```
+GET /health
+```
+
+Returns `200 oki` when the service is running. Caddy or a process monitor can poll this endpoint.
+
+---
+
+## State management and memory
+
+`tls-approval` maintains three in-memory maps:
+
+| Map | Entry TTL | Purpose |
+|---|---|---|
+| `approvedUntilByDomain` | 24 hours | Fast-path approval cache |
+| `deniedUntilByDomain` | 1 hour | Fast-path denial cache |
+| `domainLimits` | Expires after window + ban | Per-domain rate limit counters |
+
+State capacity is adaptive. A budget of `max(8 MB, total_memory / 128)` is allocated for state. The maximum entry count is derived from this budget divided by an estimated 512 bytes per domain entry, split across the three maps. A background task runs every 30 seconds (one tenth of the 5-minute rate-limit window) to:
+
+1. Evict expired entries from all three maps.
+2. Monitor RSS memory usage. If RSS exceeds twice the budget and the limit is above the minimum, the entry limit is reduced by 25%. If the entry count reaches twice the limit and memory is comfortable, the limit grows by 12.5%.
+
+The minimum entry limit is `cores × 256`, ensuring the service remains functional on constrained hardware.
+
+---
+
+## Caddy configuration
+
+Configure Caddy's `on_demand_tls` block to point at `tls-approval`:
+
+```caddy
+tls {
+  on_demand
+}
+
+on_demand_tls {
+  ask http://127.0.0.1:3001/
+}
+```
+
+Caddy will `GET http://127.0.0.1:3001/?domain=<hostname>` before attempting ACME for any new certificate. A `200` response allows the request to proceed; any other status causes Caddy to reject the handshake.

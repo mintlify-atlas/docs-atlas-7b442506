@@ -1,0 +1,85 @@
+---
+title: 'Cloud Sync: Encrypted Settings and Bookmark Backup'
+sidebarTitle: 'Cloud Sync'
+description: 'Lyra Cloud Sync stores bookmarks and settings in an encrypted SQLite database on your server. Accounts are local to your instance with JWT auth.'
+---
+
+Cloud Sync lets you back up and restore your Lyra bookmarks, settings, and browser state across devices. All data is stored on your own server in a SQLite database — there is no external cloud service involved. Accounts are local to your Lyra instance and require no third-party sign-in.
+
+## How encryption works
+
+The sync snapshot is encrypted **in the browser** using AES-256-GCM before it is sent to the server. The server stores only the ciphertext and never processes plaintext data. The encryption key is derived from the `SYNC_SECRET` environment variable via SHA-256, and JWT sessions are signed with `JWT_SECRET`.
+
+<Note>
+  Because encryption happens client-side, losing your password means losing access to your sync data permanently. Store your password in a safe place.
+</Note>
+
+## API endpoints
+
+Cloud Sync exposes two groups of endpoints on your Lyra instance.
+
+### Authentication (`/api/auth/*`)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/auth/register` | Create a new local account |
+| `POST` | `/api/auth/login` | Authenticate and receive a JWT session cookie |
+| `POST` | `/api/auth/logout` | Invalidate the current session |
+| `GET` | `/api/auth/me` | Return the currently authenticated user |
+| `DELETE` | `/api/auth/me` | Delete the account and all associated sync data |
+
+### Sync data (`/api/sync/*`)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/sync/upload` | Upload an encrypted sync snapshot |
+| `GET` | `/api/sync/download` | Download the latest encrypted snapshot |
+| `GET` | `/api/sync/meta` | Return sync metadata (`size`, `updated_at`) |
+
+## Rate limits
+
+The endpoints are rate-limited to prevent abuse:
+
+| Endpoint group | Rate limit |
+|---|---|
+| `register`, `login`, `DELETE /api/auth/me` | 2 req/s, burst 5 |
+| `POST /api/sync/upload` | 2 req/s, burst 10 |
+| `GET /api/sync/download`, `GET /api/sync/meta` | 50 req/s, burst 200 |
+
+## Storage
+
+Sync data is persisted in a SQLite database at `services/cloudsync/.db` on your server. Each user account has a single stored snapshot (the most recent upload).
+
+## Sync behavior
+
+The `CloudSync` class manages the full sync lifecycle in the browser:
+
+<AccordionGroup>
+  <Accordion title="Startup check">
+    On load, Lyra calls `GET /api/auth/me` to check authentication. If authenticated, it fetches `GET /api/sync/meta` and compares `updated_at` with the locally stored `last_synced` timestamp. If the server is newer, Lyra downloads and restores the snapshot (showing a loading overlay during import). If local data is newer (dirty), Lyra uploads immediately.
+  </Accordion>
+  <Accordion title="Dirty tracking">
+    Lyra hooks `localStorage`, `sessionStorage`, `IndexedDB`, and `document.cookie` mutations to detect changes automatically. Any mutation sets a `dirty` flag and schedules an upload after a 1.5 second debounce.
+  </Accordion>
+  <Accordion title="Polling">
+    Once authenticated, Lyra polls `GET /api/sync/meta` every 20 seconds to detect changes made on other devices. The poll interval backs off exponentially (up to 60 seconds) on repeated errors and resets to 20 seconds on success.
+  </Accordion>
+  <Accordion title="Upload compression">
+    Snapshots larger than 32 KB are compressed with gzip via the `CompressionStream` API before upload. If the compressed size is larger than the raw payload, the uncompressed version is sent instead.
+  </Accordion>
+  <Accordion title="Upload retries">
+    Failed uploads (HTTP 429 or 5xx) are retried up to 3 times with exponential backoff (2 s, 4 s, 8 s). A `401` response stops polling and prompts the user to sign in again. A `413` response indicates the snapshot is too large.
+  </Accordion>
+</AccordionGroup>
+
+## Getting started
+
+1. Open the Cloud Sync modal from the Lyra toolbar.
+2. Click **create one!** to register a new account on your instance.
+3. Enter a username (3–20 characters, letters/numbers/underscores) and a password (15+ characters).
+4. After registration, your current data is uploaded automatically.
+5. On another device, log in with the same credentials — Lyra will download and restore your snapshot.
+
+## Deleting your account
+
+Use **delete account** in the Cloud Sync modal. This calls `DELETE /api/auth/me`, which removes the account and all stored snapshots from the server. Local data is also wiped (localStorage, sessionStorage, IndexedDB, cookies, service workers, and caches) and Lyra reloads.

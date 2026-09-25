@@ -1,0 +1,85 @@
+---
+title: 'Chrome Extensions in Lyra via Rivet'
+sidebarTitle: 'Extensions'
+description: 'How Lyra emulates Chrome extension APIs (DNR, content scripts, popups, storage) in-browser via the Rivet layer without installing real extensions.'
+---
+
+Rivet is Lyra's in-browser Chrome extension emulation layer. It runs extension logic entirely inside the proxied browser context — no real browser extension is installed, and no elevated permissions are granted to the host browser. Rivet loads `.crx` files, executes their background scripts, injects content scripts into proxied pages, and renders extension popups, all within Lyra's service worker architecture.
+
+**uBlock Origin** is bundled out of the box and loaded automatically via Rivet on startup, providing ad blocking within the proxy without any setup.
+
+## Supported Chrome APIs
+
+Rivet emulates the following Chrome extension APIs:
+
+<CardGroup cols={2}>
+  <Card title="declarativeNetRequest" icon="shield">
+    Block, redirect, or modify network requests using DNR rule sets. Static, dynamic, and session rules are all supported. Rules are evaluated in priority order across all enabled extensions.
+  </Card>
+  <Card title="scripting" icon="code">
+    Content script injection into proxied pages. Scripts are injected via the Folio plugin mechanism (`createRivetContentScriptPlugin`), which hooks into the service worker's fetch pipeline.
+  </Card>
+  <Card title="tabs" icon="browser">
+    Tab management — query tabs, navigate, activate, and close. Each Lyra browser tab is exposed as a `TabInfo` object with `id`, `url`, `title`, `status`, `active`, and `favIconUrl`.
+  </Card>
+  <Card title="storage" icon="database">
+    `chrome.storage.local` and `chrome.storage.sync` backed by IndexedDB within the extension's isolated store namespace.
+  </Card>
+  <Card title="runtime" icon="gear">
+    Messaging between background scripts and content scripts, lifecycle events (`onInstalled`, `onStartup`), and cross-extension messaging.
+  </Card>
+  <Card title="webRequest" icon="network-wired">
+    Network request hooks (`onBeforeRequest`, `onBeforeSendHeaders`, `onHeadersReceived`, `onCompleted`, `onBeforeRedirect`). Events are dispatched by the DNR plugin for every proxied fetch.
+  </Card>
+</CardGroup>
+
+## Extension format and loading
+
+Extensions are distributed as `.crx` files. Rivet converts CRX to a ZIP internally, extracts the `manifest.json`, assigns a deterministic extension ID (derived from the extension name and version), and stores all files in IndexedDB.
+
+Extensions are loaded from the `/b/rivet/` path on your Lyra instance. On initialization, Rivet reads all stored extensions from IndexedDB and starts their background scripts.
+
+## Rivet API exports
+
+The public surface of `packages/rivet/src/index.ts`:
+
+| Export | Description |
+|---|---|
+| `Rivet` | Main runtime class. Instantiated once per Lyra session. |
+| `createRivetContentScriptPlugin` | Creates a Folio `ManagedPlugin` that injects registered content scripts into proxied pages. |
+| `findMatchingCommand` | Scans the extension registry for a keyboard shortcut matching a `KeyboardEvent`. |
+| `triggerCommand` | Dispatches a matched command to the owning extension. |
+| `buildExtensionUrl` | Constructs a `chrome-extension://<id>/<page>` URL for a given extension and page. |
+| `chromeExtensionUrl` | Low-level helper to format a `chrome-extension://` URL. |
+| `extensionPageReloadTarget` | Determines the correct page path to reload after an extension page is mounted (handles hash and pushState routing). |
+| `EXTENSION_POPUP_MOUNTED_EVENT` | Custom event name dispatched when an extension popup is ready to render. |
+
+## Content scripts
+
+Content scripts are registered from each extension's `manifest.json` `content_scripts` array. They are injected by `createRivetContentScriptPlugin`, which hooks into the Folio service worker's plugin system. Each script receives an emulated `chrome` global scoped to its extension ID.
+
+## Extension popups
+
+When a user opens an extension's toolbar button, Rivet renders the popup page inside the `ExtensionMenu` component. The component listens for `EXTENSION_POPUP_MOUNTED_EVENT` and mounts the popup iframe. Popups run in the same proxied context as other extension pages.
+
+## Declarative Net Request (DNR) internals
+
+DNR rules are compiled lazily on first use and cached per extension state object. The rule evaluation pipeline:
+
+<Steps>
+  <Step title="Collect rules">
+    Static rules (from `rule_resources` in the manifest), dynamic rules, and session rules are merged and sorted by priority descending, then by action priority (`allow > block > upgradeScheme > redirect > modifyHeaders`).
+  </Step>
+  <Step title="Match URL">
+    Each rule's `urlFilter` or `regexFilter` is compiled to a `RegExp`. Domain anchors (`||`), left anchors (`|`), and right anchors (`|` suffix) are translated to the correct regex prefix/suffix.
+  </Step>
+  <Step title="Apply decision">
+    The first matching non-`modifyHeaders` rule wins. If it is a `block` rule, the request receives a `204 No Content` early response. If it is a `redirect` rule, the request URL is rewritten. `modifyHeaders` rules from all matching extensions are merged, with conflicts resolved by installation order.
+  </Step>
+</Steps>
+
+## Installing extensions
+
+Extensions can be installed by uploading a `.crx` file through the Lyra extensions UI. Lyra extracts the archive, stores all files in IndexedDB, and immediately starts the background script. The extension persists across sessions.
+
+To uninstall an extension, remove it from the extensions panel. Lyra calls `uninstallExtension`, which stops the background script, unregisters all content scripts, and deletes all stored files and storage entries from IndexedDB.

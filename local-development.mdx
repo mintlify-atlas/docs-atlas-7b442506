@@ -1,0 +1,126 @@
+---
+title: "Run Lyra Locally for Development"
+sidebarTitle: "Local Dev"
+description: "Set up a local Lyra development environment using Bun. Build proxy bundles and start the hot-reload dev server in two commands."
+---
+
+Lyra's development server combines a Vite HMR frontend, an Express middleware layer, and automatic startup of all backend Rust services (Mochi, Nuru, CloudSync, Isao, and a Docker-based TURN server) in a single command. Within seconds of running `bun dev` you have a fully functional proxy stack with hot-reloading on every source change.
+
+## Prerequisites
+
+Install the following tools before cloning the repository. Versions are exact — the project pins them for reproducibility.
+
+<Warning>
+  Bun must be **exactly version 1.4.2**. The `package.json` `engines` field and
+  the setup script both enforce this. Running a different Bun release will
+  produce errors at install time or cause subtle runtime mismatches between the
+  bundler and the server.
+</Warning>
+
+| Tool | Version | Install |
+|---|---|---|
+| **Bun** | `1.4.2` | `curl -fsSL https://bun.com/install \| bash -s -- bun-v1.4.2` |
+| **Rust nightly** | `nightly-2026-06-30` | `rustup toolchain install nightly-2026-06-30 --profile minimal --component rust-src` |
+| **wasm-bindgen** | `0.2.105` | `cargo install wasm-bindgen-cli --version 0.2.105 --locked` |
+| **wasm-snip** | `0.4.0` | `cargo install wasm-snip --version 0.4.0 --locked` |
+
+<Note>
+  The Rust nightly toolchain (`nightly-2026-06-30`) is required to compile
+  Folio's WASM JavaScript rewriter. Folio rewrites web page content
+  client-side using a Rust-compiled WebAssembly module, and the build relies on
+  unstable Rust features and `rust-src` that are only available on nightly.
+  The stable Rust toolchain is not sufficient for this step.
+</Note>
+
+You will also need **Docker** (for the local TURN service) and **Cargo** available on your `PATH` — the dev server spawns Rust backend services directly via `cargo run`.
+
+## Installation
+
+Clone the repository and install JavaScript dependencies. The `postinstall` script automatically patches any dependencies that require it.
+
+```bash
+git clone https://github.com/gayq/lyra
+cd lyra
+bun i
+```
+
+## Starting the Dev Server
+
+```bash
+bun dev
+```
+
+This single command:
+
+1. Runs `build-proxy` — compiles the Folio service-worker bundle (`build-folio`) and the Rivet extension runtime (`build-rivet`).
+2. Starts `server/dev.mjs` with `NODE_ENV=development`.
+
+The dev server then spawns all backend services in parallel (Nuru, Mochi, CloudSync, Isao, TURN) via `cargo run` and prints a live status dashboard to your terminal as each one transitions from `starting…` → `compiling…` → `ready`.
+
+```
+services:
+ turn      ~ ready !! (˵◝ ⩊  ◜˵マ
+ nuru      ~ ready !! (˵◝ ⩊  ◜˵マ
+ mochi     ~ ready !! (˵◝ ⩊  ◜˵マ
+ cloudsync ~ ready !! (˵◝ ⩊  ◜˵マ
+ isao      ~ ready !! (˵◝ ⩊  ◜˵マ
+```
+
+The main app listens on **port 4444** by default. Open `http://localhost:4444` in your browser once all services show `ready`.
+
+### Web Only (Skip Backend Autostart)
+
+If you only want the Vite + Express frontend without spinning up the Rust backend services — for example when working purely on UI — set `DEV_AUTOSTART=0`:
+
+```bash
+bun run dev:web
+```
+
+This is equivalent to running `bun dev` with `DEV_AUTOSTART=0`. The proxy routes for Mochi, Nuru, CloudSync, and Isao will return errors until those services are started separately, but the UI, HMR, and static asset serving all work normally.
+
+## Available Scripts
+
+All scripts are defined in `package.json` and run with `bun run <script>`.
+
+| Command | Description |
+|---|---|
+| `bun dev` | Build proxy bundles then start the hot-reload dev server with all backend services. |
+| `bun run dev:web` | Build proxy bundles then start the dev server with backend autostart disabled (`DEV_AUTOSTART=0`). |
+| `bun run build` | Full production build: compiles proxy bundles, runs Vite (Terser minification, LightningCSS), and runs the post-build audit. |
+| `bun run build-folio` | Build only the Folio service-worker bundle (requires Rust nightly + wasm-bindgen). |
+| `bun run build-rivet` | Build only the Rivet Chrome extension runtime bundle. |
+| `bun run build-proxy` | Runs `build-folio` then `build-rivet`. Called automatically by `dev` and `build`. |
+| `bun run typecheck` | TypeScript type-checking across all packages — the main app, Rivet, and Folio (all sub-packages). |
+| `bun run lint` | Run ESLint across the entire codebase. |
+| `bun run audit-build` | Post-build audit script that validates the contents of `dist/`. Run automatically at the end of `bun run build`. |
+
+## Dev Server Port Map
+
+The dev server routes incoming requests to local backend services based on path prefixes. These ports match the `DEV_*_PORT` defaults in `server/dev.mjs`.
+
+| Path Prefix | Backend | Default Port |
+|---|---|---|
+| `/!!/`, `/!!raw/`, `/!!folio/`, `/!cover!/`, `/stream/` | Mochi (proxy) | 4002 |
+| `/api/auth`, `/api/sync` | CloudSync | 4005 |
+| `/api/anime` | Isao | 4003 |
+| `/w/` | Nuru (Wisp tunnel) | 4001 |
+
+Override any port via environment variables before starting the server:
+
+```bash
+MOCHI_PORT=4002 ISAO_PORT=4003 CLOUDSYNC_PORT=4005 bun dev
+```
+
+## Production Build
+
+To produce a fully minified, audited build identical to what `setup.sh` deploys:
+
+```bash
+bun run build
+```
+
+Vite bundles the Preact frontend with Terser compression (two-pass, console-stripped) and LightningCSS, writing output to `dist/`. The `audit-build` script then validates the output. The production server is started separately with:
+
+```bash
+bun run start
+```

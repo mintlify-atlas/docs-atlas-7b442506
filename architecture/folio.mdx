@@ -1,0 +1,186 @@
+---
+title: "Folio: Service Worker Proxy Engine with WASM JS Rewriting"
+sidebarTitle: "Folio"
+description: "How Folio intercepts browser requests via a service worker, rewrites JavaScript using a Rust/WASM AST transformer, and routes traffic through Mochi."
+---
+
+Folio is Lyra's in-browser proxy engine. It runs as a **service worker** and acts as the glue between the browser tab and Mochi: intercepting every network request a proxied page makes, encoding the target URL into a Mochi-routable path, forwarding the request through the transport layer, and rewriting the response so the page behaves as if it were running on its real origin.
+
+Folio is a vendored fork of [Scramjet](https://github.com/MercuryWorkshop/scramjet), a service-worker-based web proxy framework. Lyra uses two packages from the fork:
+
+| Package | Source path | Role |
+|---|---|---|
+| `@folio/core` | `vendor/folio/packages/core/` | Request interception, rewriting pipeline, client-side DOM patches |
+| `@folio/controller` | `vendor/folio/packages/controller/` | Service worker registration, `Controller`/`Frame` management, cookie persistence |
+
+## Architecture Overview
+
+```
+Browser Tab (proxied page)
+  │  fetch() / XHR / WebSocket / Worker
+  ▼
+Folio Service Worker  (/b/ path)
+  │  FolioFetchHandler.handleFetch()
+  ▼
+@folio/controller  (Controller / Frame)
+  │  ProxyTransport (Wisp over WebSocket → Nuru)
+  │      OR
+  │  Mochi HTTP (/!!folio/request/*)
+  ▼
+Mochi / Nuru
+  │
+  ▼
+Origin server
+```
+
+Folio registers at the `/b/` path in the user's browser. Once registered, it intercepts every `fetch` event for URLs under that scope. The **Controller** class (in `@folio/controller`) manages the connection between the main page and the service worker via a `MessageChannel`, coordinates cookie persistence in IndexedDB, and creates **Frame** objects that each own a `FolioFetchHandler` responsible for dispatching requests.
+
+## Service Worker Registration and Control
+
+The `@folio/controller` package exposes two classes:
+
+### `Controller`
+
+The top-level object instantiated once per browser tab. It owns:
+
+- A `ProxyTransport` (the Wisp/Nuru WebSocket connection)
+- A `CookieJar` (persisted to IndexedDB under `__folio_controller`)
+- A `BroadcastChannel` (`__folio_controller_channel`) for cross-tab cookie sync
+- An RPC channel to the service worker via `MessageChannel`
+
+On construction, the `Controller` sends a `$controller$init` message to the service worker with the route prefix and session ID. The service worker acknowledges with a `ready` RPC call.
+
+### `Frame`
+
+Each `Frame` object maps to a proxied iframe element and owns a `FolioFetchHandler`. Frames have an independent prefix (`/f/<controllerId>/<frameId>/`) so multiple proxied tabs can coexist under a single service worker without URL collisions.
+
+```typescript
+const controller = new Controller({
+  serviceworker: registration.active,
+  transport: wispTransport,
+});
+
+await controller.wait();
+
+const frame = controller.createFrame(iframeElement);
+frame.go("https://example.com");
+```
+
+## URL Encoding
+
+All URLs proxied through Folio are encoded into the service worker's route namespace before being sent upstream. The default codec in `@folio/controller` uses `encodeURIComponent` / `decodeURIComponent`, producing paths like:
+
+```
+/f/<controllerId>/<frameId>/https%3A%2F%2Fexample.com%2Fpath
+```
+
+Mochi, by contrast, uses a custom XOR+Base64 scheme (the `encode_mochi_url` / `decode_mochi_url` functions in `mochi::encoding`) for its own `/!!/` namespace. Folio-originated requests reach Mochi via the `/!!folio/request/` prefix, where the target URL is percent-encoded in the path.
+
+## Rewriters
+
+Folio's rewriting pipeline transforms responses so all URLs and APIs reference the proxy's origin rather than the real origin. There are five rewriters:
+
+<AccordionGroup>
+  <Accordion title="URL rewriter (url.ts)">
+    The foundational rewriter used by all others. `rewriteUrl()` converts an absolute or relative URL into a proxy-routed URL by:
+
+    1. Resolving the URL against the current `meta.base` using the native `URL` constructor.
+    2. Encoding the resolved absolute URL with `context.interface.codecEncode`.
+    3. Prepending the frame prefix.
+    4. Appending optional query params: `referrerPolicy`, `isModule`, `topFrame`, `parentFrame`, `mode`, `credentials`, `destination`.
+
+    Special cases are handled without routing: `javascript:` URLs have their body rewritten by the JS rewriter inline; `blob:` and `data:` URLs are passed through the prefix unchanged; very large `data:` URLs (> 2 MB when combined with the prefix) are converted to `blob:` object URLs first to avoid Chrome's URL length limit.
+
+    URLs that already belong to the proxy route (i.e., start with `routePrefix.pathname`) are returned unchanged to prevent double-encoding.
+  </Accordion>
+  <Accordion title="HTML rewriter (html.ts)">
+    `IncrementalHtmlRewriter` wraps **htmlparser2** and **dom-serializer** to process HTML incrementally as chunks arrive from the service worker. It:
+
+    - Rewrites `src`, `href`, `action`, `data`, `poster`, and `srcset` attributes on elements matched by `htmlRules`.
+    - Rewrites inline `on*` event handler attributes (all 80+ standard event attributes) through the JS rewriter.
+    - Rewrites inline `<style>` element content through the CSS rewriter.
+    - Rewrites `<script>` element bodies (non-module and module) through the JS rewriter.
+    - Rewrites `<script type="importmap">` JSON: each entry in `imports` is individually URL-rewritten.
+    - Strips `<meta http-equiv="Content-Security-Policy">` tags (replacing them with HTML comments) to prevent the origin's CSP from blocking the proxy's injected scripts.
+    - Rewrites `<meta http-equiv="refresh">` redirect URLs.
+    - Updates `<base href>` to track the effective base URL for subsequent relative URL resolution.
+    - Injects the Folio client scripts (`folio.js`, WASM loader, `inject.js`, and a data-URL inline bootstrap) at the top of `<head>`, or at position 0 of the document root for quirky non-standard document structures.
+  </Accordion>
+  <Accordion title="CSS rewriter">
+    Scans CSS text for `url(...)` declarations and rewrites each URL through `rewriteUrl`. Handles quoted and unquoted values, resolves relative URLs against the current base, and leaves `data:` and `#fragment` values untouched.
+  </Accordion>
+  <Accordion title="JS rewriter (js.ts — WASM)">
+    The most sophisticated rewriter. `rewriteJs()` calls into a **Rust/WASM module** (`folio.wasm`) built with the [oxc](https://oxc.rs/) parser for full, spec-compliant AST analysis. The WASM module:
+
+    - Parses the JavaScript AST (both classic scripts and ES modules).
+    - Rewrites every expression that could produce or consume a URL:  `location`, `document.URL`, `document.domain`, `import()`, `importScripts()`, `fetch()`, `new WebSocket()`, `new Worker()`, `new SharedWorker()`, `new EventSource()`, `new XMLHttpRequest()`, `open()`, `postMessage()`, `navigator.sendBeacon()`, property assignments like `iframe.src = ...`, and more.
+    - Wraps these expressions in the proxy's runtime helper functions (`$folio$wrap`, `$folio$prop`, etc.) so the rewritten script uses proxied URLs at runtime rather than hard-coded ones in the source.
+    - Optionally emits source maps for the rewritten output (controlled by `flags.sourcemaps`).
+    - Tolerates invalid/partial JavaScript when `flags.allowInvalidJs` is set (the default in production).
+
+    The WASM binary is inlined as a base64 string in the bundled `folio.bundle.js` during the build. At runtime, the controller fetches the WASM from `config.wasmPath` and calls `setWasm()` before any rewriting occurs.
+  </Accordion>
+  <Accordion title="WASM binary rewriter">
+    Post-processes `.wasm` binary responses to rewrite any URLs embedded as string constants within the WebAssembly module's data segments. Less commonly triggered than the other rewriters.
+  </Accordion>
+</AccordionGroup>
+
+## Client-Side DOM Patches
+
+When Folio injects scripts into an HTML page, the **`inject.js`** bootstrap runs before any page script and patches the following browser APIs so that proxied pages behave correctly:
+
+<CardGroup cols={2}>
+  <Card title="Location & History" icon="map-pin">
+    `window.location`, `history.pushState`, `history.replaceState` — all redirected through the proxy codec so navigation stays within the service worker scope.
+  </Card>
+  <Card title="Fetch & XHR" icon="arrow-up-right-from-square">
+    `window.fetch`, `XMLHttpRequest.prototype.open` — URLs are rewritten before the request leaves the browser.
+  </Card>
+  <Card title="WebSocket" icon="plug">
+    `window.WebSocket` — non-whitelisted hosts are tunneled through Nuru via Wisp. A small whitelist (Discord, etc.) bypasses the proxy for direct connections.
+  </Card>
+  <Card title="Workers" icon="gears">
+    `window.Worker`, `window.SharedWorker` — script URLs are rewritten so workers also run within the proxy scope.
+  </Card>
+  <Card title="DOM property setters" icon="code">
+    `HTMLIFrameElement.src`, `HTMLImageElement.src`, `HTMLScriptElement.src`, `HTMLLinkElement.href`, `HTMLObjectElement.data`, and `Element.prototype.setAttribute` — all intercepted to rewrite assigned URLs.
+  </Card>
+  <Card title="Cookie & Storage" icon="database">
+    Cookie reads/writes are mediated by Folio's `CookieJar` to maintain per-origin cookie state across the proxy. HttpOnly cookies are synced separately between the service worker and the controller.
+  </Card>
+</CardGroup>
+
+Additionally, the bootstrap stubs out:
+
+- `navigator.serviceWorker` — prevents proxied pages from registering their own service workers that would conflict with Folio.
+- `window.devicePixelRatio` — returns `1` to avoid fingerprinting.
+- `window.dataLayer`, `window.gtag`, `window.ga`, `window.google.ima` — stubs out Google Analytics and IMA SDK to prevent tracking.
+- `window.__tcfapi` — stubs out IAB TCF consent framework calls.
+- `window.onbeforeunload` / `beforeunload` event listeners — suppressed to prevent pages from blocking navigation within the proxy.
+
+## Folio Cache (Mochi Side)
+
+Folio requests reach Mochi via the `/!!folio/request/` prefix. Mochi's `folio.rs` handler manages a **dedicated Folio cache** (`folio_cache`) that is separate from the main proxy cache:
+
+- Cache keys are SHA-256 hashes of method + URL + normalised headers, with optional session scoping.
+- Responses with `Set-Cookie` headers or `Cache-Control: no-store` are never cached.
+- Responses with `private` cache-control or sent by requests with `Cookie`/`Authorization` headers use session-scoped cache keys (tied to the `x-mochi-folio-session` header value).
+- Stale-while-revalidate: if a cached entry is stale, Mochi sends conditional requests (`If-None-Match` / `If-Modified-Since`) and refreshes the entry on `304 Not Modified`.
+
+The upstream response metadata (status, headers, final URL, cache status) is returned to Folio in the `x-mochi-upstream-meta` response header, encoded as URL-safe Base64 JSON.
+
+## Configuration Flags
+
+Folio's runtime behaviour is controlled by `FolioConfig.flags`, which can be overridden per-deployment in `@folio/controller`:
+
+| Flag | Default | Description |
+|---|---|---|
+| `sourcemaps` | `true` | Emit source maps from the WASM JS rewriter |
+| `allowInvalidJs` | `true` | Return original JS on parse error instead of throwing |
+| `encapsulateWorkers` | `true` | Rewrite Worker script URLs |
+| `destructureRewrites` | `true` | Enable destructuring assignment rewriting |
+| `rewriterLogs` | `false` | Log timing for each rewrite operation |
+| `captureErrors` | `false` | Capture and forward rewriter errors (dev only) |
+| `debugTrampolines` | `false` | Insert debug assertions into rewritten trampolines |
+| `syncxhr` | `false` | Allow synchronous XHR through the proxy |
+| `disableComputedWrap` | `false` | Disable computed property rewriting |

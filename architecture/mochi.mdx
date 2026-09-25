@@ -1,0 +1,202 @@
+---
+title: "Mochi: Rust Reverse Proxy with Multi-Tier Caching"
+sidebarTitle: "Mochi"
+description: "How Mochi proxies web requests for Lyra, including in-memory Moka caches, disk-based stream caching, adaptive concurrency gates, and HTML/JS rewriting."
+---
+
+Mochi is Lyra's core reverse proxy service, written in Rust on top of the **Axum** web framework. It is responsible for fetching resources from the public internet on behalf of proxied browser tabs, rewriting HTML and CSS responses so all embedded URLs route back through Lyra, serving responses from a multi-tier cache, and handling HLS/video stream proxying for the anime player. Every Mochi instance is a fully independent process; Caddy load-balances across them on port `4000`.
+
+## Stack
+
+Mochi is built on the following key dependencies:
+
+- **[Axum](https://github.com/tokio-rs/axum)** — async HTTP server framework
+- **[reqwest](https://github.com/seanmonstar/reqwest)** — HTTP client with connection pooling and HTTP/2 keep-alive
+- **[Moka](https://github.com/moka-rs/moka)** — concurrent async in-memory cache with TTL and weight-based eviction
+- **[lol-html](https://github.com/cloudflare/lol-html)** — streaming HTML rewriter (same library Cloudflare uses)
+- **[Aho-Corasick](https://github.com/BurntSushi/aho-corasick)** — multi-pattern string matcher for the ad/tracker blocklist
+- **[tower-http](https://github.com/tower-rs/tower-http)** — compression and CORS middleware
+- **[mimalloc](https://github.com/microsoft/mimalloc)** — high-throughput allocator (`#[global_allocator]`)
+
+## HTTP Clients
+
+Mochi maintains three separate `reqwest::Client` instances, each tuned for a different upstream use case:
+
+<AccordionGroup>
+  <Accordion title="html_client — full page fetches">
+    Used when proxying HTML documents that will be rewritten. Has a **120-second** full request timeout (the entire HTML body must be received before rewriting begins), a smaller per-host connection pool (`pool_idle_per_host_html = cores × 2`, capped at 16), and follows public redirects through the `public_redirect_policy`.
+  </Accordion>
+  <Accordion title="asset_client — general assets">
+    Used for images, scripts, fonts, JSON, and all other non-HTML responses. Has a **60-second read timeout**, a larger per-host pool (`pool_idle_per_host_asset = cores × 3`, capped at 32), and also follows public redirects.
+  </Accordion>
+  <Accordion title="raw_client — no-redirect raw proxy">
+    Used exclusively for `/!!raw/*` routes. Configured with `Policy::none()` so redirects are **never** followed — the redirect response is passed back verbatim to the caller, which uses it to implement its own redirect handling.
+  </Accordion>
+</AccordionGroup>
+
+All three clients use `TCP_NODELAY`, 60-second TCP keepalive, HTTP/2 keep-alive intervals (15 s interval, 20 s timeout), a Chrome 124 User-Agent string, and Mochi's **safe DNS resolver** that rejects loopback, RFC 1918, link-local, and multicast IPs.
+
+### Redirect Policy
+
+The `public_redirect_policy` used by `html_client` and `asset_client` allows a redirect to be followed only when:
+
+- The scheme is `http` or `https`
+- There are no credentials embedded in the URL
+- The port is 80, 443, or ≥ 1024
+- The hostname resolves to a public IP (not `localhost`, `.local`, `.internal`, `.home.arpa`, or any RFC 1918 address)
+
+## Multi-Tier Cache
+
+Mochi uses four distinct caches, each optimised for a different content type and access pattern:
+
+<Steps>
+  <Step title="RAM cache (Moka)">
+    General-purpose in-memory cache for HTML pages, assets, CSS, JS, and JSON. Capacity is `ram_mb / 48`, clamped to 64 – 4096 MB. Individual entries are weight-limited to `cache_cap_mb / 4`, clamped to 16 – 512 MB. TTL is 24 h (servers with < 8 GB RAM) or 48 h (larger).
+  </Step>
+  <Step title="Stream cache (Moka)">
+    Separate in-memory cache for HLS video/audio segments. Capacity is `ram_mb / 24`, clamped to 128 – 2048 MB, with a 64 MB per-entry cap. Using a separate cache prevents large media segments from evicting HTML/asset entries.
+  </Step>
+  <Step title="Folio cache (Moka)">
+    Service-worker-specific cache keyed by a SHA-256 hash of the method, URL, and request headers (with session-scoping for authenticated requests). Capacity is `max(cache_capacity / 2, 64 MB)`. Per-entry cap is `min(max_cache_entry_size, 8 MB)`. Cache policy is derived from `Cache-Control` response headers — `no-store` and `set-cookie` responses are never cached.
+  </Step>
+  <Step title="Disk cache">
+    Long-lived binary cache at `./cache/` and `./cache/stream/`. File format is a custom binary envelope: `u16 status | u16 header_count | (u16 k_len | k_bytes | u32 v_len | v_bytes)* | body_bytes`. Writes go to a `.tmp` file first and are atomically renamed on success so partial writes never corrupt the cache. A background task (`disk_cache_cleanup_task`) periodically evicts files older than `disk_max_age_secs` and LRU-evicts when total size exceeds `disk_cache_bytes`.
+  </Step>
+</Steps>
+
+<Tip>
+  The disk cache path is relative to Mochi's working directory. The systemd unit sets this to `/var/cache/lyra-mochi/instance-N/`. Configure total disk budget with `MOCHI_STREAM_CACHE_GB` and retention with `MOCHI_STREAM_CACHE_TTL_DAYS`.
+</Tip>
+
+### Cache Coherence
+
+Before going upstream, Mochi checks whether a response can enter the shared cache by examining:
+
+- `request_allows_shared_cache` — rejects requests with `Authorization`, `Proxy-Authorization`, or any `Cookie` header beyond the internal `mochi_base` token.
+- `response_allows_shared_cache` — rejects responses with `Set-Cookie`, a non-empty `Vary` header, or `Cache-Control: private/no-store/no-cache`.
+- `request_forces_refresh` — bypasses the cache for requests with `If-None-Match`, `If-Modified-Since`, or `Cache-Control: no-cache/no-store`.
+
+For eligible assets, Mochi coalesces duplicate in-flight requests using a `DashMap<String, broadcast::Sender<Arc<CachedResponse>>>`: the first request to a URL wins the upstream slot; all others subscribe and wait up to 30 seconds for the broadcast.
+
+## Route Table
+
+```
+GET  /health                         → "oki"
+GET  /metrics                        → ProxyMetricsSnapshot (JSON)
+GET  /!!folio/capabilities           → { ok: true, protocol: 1 }
+GET  /!!folio/metrics                → FolioMetricsSnapshot (JSON)
+ANY  /!!folio/request/*target        → Folio request handler
+GET  /stream/metrics                 → StreamMetricsSnapshot (JSON)
+GET  /stream/info                    → Episode stream metadata (JSON)
+ANY  /stream/*path                   → HLS/video stream proxy
+ANY  /!!raw/*key                     → Raw proxy (no redirect following)
+ANY  /!!/*key                        → Main proxy handler
+ANY  /*path                          → Main proxy handler (fallback)
+```
+
+<Note>
+  `MOCHI_PREFIX` is `/!!/` and `MOCHI_RAW_PREFIX` is `/!!raw/`. These constants are defined in `constants.rs` and are also injected into proxied pages as `window.__MOCHI_PREFIX__`.
+</Note>
+
+## Adaptive Concurrency Gates
+
+Mochi manages three independent `AdaptiveGate` semaphores, all rebalanced every **2 seconds** by the shared `adaptive-capacity` rebalancer:
+
+| Gate | Workload class | Memory per permit | Purpose |
+|---|---|---|---|
+| `request_permit` | `Io` | `ram_cache_limit` | General HTTP proxy requests |
+| `stream_upstream_permit` | `Io` | `ram_cache_limit` | Upstream fetches for HLS segments |
+| `html_rewrite_permit` | `Cpu` | 16 MB | `spawn_blocking` HTML rewrite tasks |
+
+The `html_rewrite_permit` gate is classified `Workload::Cpu` because rewriting HTML is synchronous and CPU-bound. Its limit is bounded by both available memory and normalised CPU load, preventing the threadpool from being overwhelmed by large HTML pages during traffic spikes.
+
+Every handler that acquires a gate permit uses `acquire_timeout(Duration::from_secs(5))`. If no permit is available within 5 seconds, the request returns `503 Service Unavailable` with `x-lyra-error-class: infrastructure`.
+
+## Memory Pressure Monitor
+
+A background task (`spawn_monitor`) polls `MemoryPressure` continuously. When RSS approaches `ram_cache_limit`, the `memory::admit` middleware rejects incoming requests with `503` before they consume additional memory. This acts as a circuit breaker at the Axum layer — before any gate acquisition — so the process stays stable even when the OS is under swap pressure.
+
+## HTML Rewriting
+
+When a proxied response has `Content-Type: text/html`, Mochi:
+
+1. Acquires an `html_rewrite_permit` (5-second timeout, `Cpu` workload gate).
+2. Reads the full body, capped at **16 MB** (`MAX_HTML_BODY_SIZE`).
+3. Offloads rewriting to `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+4. Uses `lol_html::HtmlRewriter` to stream-rewrite the HTML DOM, rewriting every `href`, `src`, `action`, `data`, and `poster` attribute through `encode_mochi_url`, and prepending the inline `<script>` bootstrap (`PART_1` + base URL + `PART_2`) that patches `window.fetch`, `XMLHttpRequest`, `WebSocket`, `Worker`, and DOM property setters.
+5. The rewritten body is stored in the RAM cache and written to disk asynchronously.
+
+CSS responses are rewritten inline (no blocking task needed) by the `rewrite_css_urls` function, which scans for `url(...)` declarations and encodes any absolute or resolved relative URL through Mochi's encoding scheme.
+
+## Ad and Tracker Blocking
+
+The blocklist is implemented as a compiled **Aho-Corasick** automaton over the following patterns:
+
+```
+google-analytics.com
+googletagmanager.com
+doubleclick.net
+adsbygoogle
+js.rev.iq
+motorsnag.com
+monetag
+netpub
+```
+
+Any request whose target URL contains one of these patterns is short-circuited. For `/!!raw/*` routes the response is `200 OK` with `Content-Type: application/javascript` and body `/* request blocked ... /ᐠ - ˕ -マ */`. For main proxy routes the same stub JS is returned without going upstream.
+
+## SSRF Protection
+
+The `safe_dns::PublicDnsResolver` is attached to all three HTTP clients. Before establishing a connection, it resolves the target hostname and rejects the request if any returned IP is:
+
+- Loopback (`127.0.0.0/8`, `::1`)
+- RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`)
+- Link-local (`169.254.0.0/16`, `fe80::/10`)
+- Multicast (`224.0.0.0/4`, `ff00::/8`)
+
+The redirect policy applies the same check synchronously to each redirect destination before following it.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `MOCHI_PORT` | `4002` | TCP port this instance listens on |
+| `MOCHI_HOST` | `0.0.0.0` | Bind address |
+| `MOCHI_INSTANCES` | `1` | Number of sibling instances; used to divide available RAM for per-instance tuning |
+| `MOCHI_STREAM_CACHE_GB` | auto | Override disk stream cache size in GB (capped at 75% of available disk) |
+| `MOCHI_STREAM_CACHE_TTL_DAYS` | auto | Override disk cache max age (1–30 days) |
+| `MOCHI_STREAM_UPSTREAM_PERMITS` | auto | Override maximum stream upstream permits |
+
+## Metrics
+
+`GET /metrics` returns a JSON snapshot of all counters:
+
+```json
+{
+  "requests": 0,
+  "raw_requests": 0,
+  "cache_hits": 0,
+  "disk_cache_hits": 0,
+  "coalesced_requests": 0,
+  "upstream_requests": 0,
+  "upstream_retries": 0,
+  "upstream_errors": 0,
+  "network_errors": 0,
+  "temporary_source_errors": 0,
+  "unavailable_source_errors": 0,
+  "implementation_errors": 0,
+  "html_rewrites": 0,
+  "capacity": {
+    "active": 0,
+    "limit": 0,
+    "minimum": 0,
+    "maximum": 0,
+    "peak": 0,
+    "waits": 0,
+    "rejected": 0
+  },
+  "memory": {}
+}
+```
+
+Error responses from Mochi include an `x-lyra-error-class` header with one of: `network`, `temporary-source`, `unavailable`, `invalid-request`, `upstream-data`, `infrastructure`, or `implementation`.

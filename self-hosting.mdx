@@ -1,0 +1,146 @@
+---
+title: "Deploy Lyra on Your Own Server"
+sidebarTitle: "Self-Hosting"
+description: "Step-by-step guide to deploy Lyra on a Debian or Ubuntu server using the automated setup.sh script with systemd, Caddy, and optional WireGuard VPN."
+---
+
+Lyra ships with a single automated shell script — `setup.sh` — that handles everything from dependency installation and Rust compilation to systemd service registration and Caddy configuration. The script is idempotent: running it again on an existing deployment safely stops all services, updates binaries, and restarts cleanly.
+
+## Prerequisites
+
+Before running the setup script, confirm your server meets these requirements:
+
+- **OS:** Debian or Ubuntu (any derivative with `apt` and `systemd`).
+- **cgroup v2** with `cpu`, `memory`, and `pids` controllers enabled. The script enforces this and will exit if the controllers are not available.
+- **Minimum RAM:** ~2 GB. The script auto-scales the number of Mochi and Nuru worker instances to fit available memory (≥384 MB per Mochi instance, ≥256 MB per Nuru instance). More RAM enables more parallel proxy workers.
+- **Disk space:** At least a few GB free under `/var/cache/lyra-mochi` for the anime stream cache.
+- **Root or `sudo` access:** The script uses `sudo` throughout for system-level configuration.
+
+<Note>
+  cgroup v2 is the unified hierarchy introduced in Linux 4.5 and is the default
+  on modern Debian 11+ and Ubuntu 22.04+ kernels. You can verify it is active by
+  checking that `/sys/fs/cgroup/cgroup.controllers` exists and contains `cpu`,
+  `memory`, and `pids`. If your host uses cgroup v1 (common on older VPS
+  images), you will need to re-provision or enable the unified hierarchy via your
+  bootloader's `systemd.unified_cgroup_hierarchy=1` kernel parameter.
+</Note>
+
+## Deployment
+
+<Steps>
+  <Step title="Clone the repository">
+    SSH into your server and clone the Lyra repository. The setup script must be run from inside the cloned directory.
+
+    ```bash
+    git clone https://github.com/gayq/lyra
+    cd lyra
+    ```
+  </Step>
+
+  <Step title="Run the setup script">
+    Execute the script with Bash. It will install all system dependencies (including Bun, Rust nightly, Caddy, and eturnal), compile Mochi, Nuru, CloudSync, and Isao from source, build the front-end assets, write systemd unit files, and start every service.
+
+    ```bash
+    bash setup.sh
+    ```
+
+    The script detects your CPU count and total RAM to automatically pick sensible values for `MOCHI_INSTANCES` and `NURU_INSTANCES`. You can override these before running:
+
+    ```bash
+    MOCHI_INSTANCES=4 NURU_INSTANCES=4 bash setup.sh
+    ```
+
+    <Tip>
+      The setup script is safe to re-run at any time. It stops all existing services
+      gracefully before applying the new configuration, so you can use it to upgrade
+      Lyra in place.
+    </Tip>
+  </Step>
+
+  <Step title="(Optional) Configure WireGuard">
+    When the script detects an interactive terminal it will prompt you to route Mochi and Nuru traffic through a WireGuard VPN. This keeps your server's real IP hidden from upstream sites proxied by Lyra.
+
+    ```
+    > route mochi and nuru through a wireguard vpn? (y/n)
+    ```
+
+    - **`y`** — You will be prompted to paste your WireGuard config into `nano`. The script validates it, strips IPv6 addresses (which Lyra disables at the kernel level), adjusts the MTU, and installs it to `/etc/wireguard/wg0.conf`.
+    - **`n`** — Mochi and Nuru connect directly through your server's default route. You can enable WireGuard later by re-running `setup.sh`.
+
+    For non-interactive deployments (e.g. CI or cloud-init), set the environment variable before running:
+
+    ```bash
+    LYRA_WIREGUARD=yes bash setup.sh   # uses existing /etc/wireguard/wg0.conf
+    ```
+
+    A `nuru-route.timer` systemd timer runs the routing script every 60 seconds to ensure VPN policy routes survive network events.
+  </Step>
+
+  <Step title="Verify service health">
+    Once setup completes successfully, hit the public health endpoints through Caddy to confirm all services are running. Replace `your-domain.tld` with your server's domain or IP address.
+
+    ```bash
+    curl https://your-domain.tld/health
+    # → oki
+
+    curl https://your-domain.tld/mochi/health
+    # → oki
+
+    curl https://your-domain.tld/nuru/health
+    # → oki
+    ```
+
+    All healthy services return the plain-text string `oki`.
+  </Step>
+</Steps>
+
+## Service Overview
+
+The setup script registers and starts the following units. Mochi and Nuru run as templated systemd services (`mochi@N`, `nuru@N`) so each instance has its own cgroup resource budget inside the `lyra-proxy.slice`.
+
+| Service | Port(s) | Description |
+|---|---|---|
+| `tls-approval` | 3001 | On-demand TLS approval gate used by Caddy |
+| `lyra` | 4444 | Main Lyra application server (Bun, HTTP/2) |
+| `cloudsync` | 4005 | Cloud sync and auth service (Rust) |
+| `isao` | 6001 | Anime metadata service (Rust) |
+| `mochi@N` | 4100, 4101, … | Reverse proxy workers — one per instance |
+| `nuru@N` | 4200, 4201, … | Wisp WebSocket tunnel workers — one per instance |
+| `caddy` | 443 / 80 | TLS termination and reverse proxy |
+| `eturnal` | 3478 (UDP/TCP) | TURN server for WebRTC relay |
+
+## Health Check Endpoints
+
+All health checks return `oki` with HTTP 200 when the service is healthy, or HTTP 503 when it is not. Use these for uptime monitoring or load-balancer health probes.
+
+| Endpoint | Service |
+|---|---|
+| `/health` | Main Lyra app |
+| `/mochi/health` | Mochi reverse proxy (load-balanced) |
+| `/nuru/health` | Nuru WebSocket tunnel (load-balanced) |
+| `/cloudsync/health` | CloudSync service |
+| `/isao/health` | Isao anime metadata |
+| `/eturnal/health` | eturnal TURN server (TCP probe) |
+
+## Environment Variables
+
+The following environment variables can be set before running `setup.sh` to override defaults. The script auto-generates `JWT_SECRET` and `SYNC_SECRET` on first run and persists them in `.env` — you do not need to set those manually.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MOCHI_INSTANCES` | auto (CPU / RAM) | Number of Mochi reverse-proxy worker processes. Must be 1–32. |
+| `NURU_INSTANCES` | auto (CPU / RAM, max 18) | Number of Nuru WebSocket tunnel worker processes. Must be 1–32. |
+| `TURN_HOST` | auto-detected public IP | Hostname advertised to WebRTC clients for the TURN server. |
+| `TURN_PORT` | `3478` | UDP/TCP port for the eturnal TURN server. |
+| `TURN_USERNAME` | `lyly` | TURN credential username. |
+| `TURN_CREDENTIAL` | random (openssl) | TURN credential password. Auto-generated on first run. |
+| `LYRA_WIREGUARD` | `no` | Set to `yes` to enable WireGuard non-interactively (requires existing `/etc/wireguard/wg0.conf`). |
+
+## Firewall
+
+If UFW is active on your server, the setup script automatically opens the required ports:
+
+```
+80/tcp    443/tcp    443/udp
+3478/tcp  3478/udp   49152-65535/udp  (TURN relay range)
+```

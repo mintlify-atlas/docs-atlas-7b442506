@@ -1,0 +1,94 @@
+---
+title: 'Web Proxy: Browse Any Site Through Lyra'
+sidebarTitle: 'Proxy'
+description: 'How Lyra proxies web traffic through Folio service workers and Mochi, including transport options, URL routing, and the ad/tracker blocklist.'
+---
+
+Lyra routes all proxied browser traffic through two components: **Folio**, a service worker that intercepts requests in the browser, and **Mochi**, a reverse proxy running on your server. When you navigate to a URL inside Lyra, Folio encodes it and forwards it to Mochi, which fetches the real content and streams it back — all within your own hosted instance with no third-party relay.
+
+## How the proxy works
+
+The Folio service worker registers itself and intercepts every `fetch` event made by the proxied page. Encoded URLs travel through Mochi on the following route patterns:
+
+| Route | Purpose |
+|---|---|
+| `/!!/*` | Standard proxied requests |
+| `/!!raw/*` | Raw passthrough (unmodified response) |
+| `/!!folio/*` | Folio-specific internal resources |
+
+The proxy runtime (`src/core/proxy/proxyRuntime.ts`) manages the full service worker lifecycle — script loading from `/b/all.js`, registration, the waiting/activating states, and final activation. If `preloadProxy` is enabled, Lyra warms the runtime on startup before any URL is entered.
+
+## Transport options
+
+Two transport backends are available and can be switched in **Settings → Transport**:
+
+<CardGroup cols={2}>
+  <Card title="Epoxy" icon="bolt">
+    The default transport. Uses a WebSocket-based bare client for fast, low-overhead connections.
+  </Card>
+  <Card title="libcurl" icon="wrench">
+    An alternative transport backed by a WASM build of libcurl. Useful when Epoxy connections are filtered or blocked.
+  </Card>
+</CardGroup>
+
+The setting is stored in `localStorage` under the key `transport` and defaults to `epoxy`.
+
+## Ad and tracker blocklist
+
+Mochi includes a built-in blocklist that drops requests to known ad and tracking domains before they leave your server. The following domains are blocked:
+
+<AccordionGroup>
+  <Accordion title="Blocked domains">
+    - `google-analytics.com`
+    - `googletagmanager.com`
+    - `doubleclick.net`
+    - `adsbygoogle` (Google AdSense script)
+    - `js.rev.iq`
+    - `motorsnag.com`
+    - `monetag`
+    - `netpub`
+  </Accordion>
+</AccordionGroup>
+
+No extension or additional configuration is needed — this list is enforced at the Mochi layer for every proxied request.
+
+## Search engines
+
+The Lyra address bar doubles as a search field. The default engine is **DuckDuckGo**; the full list of supported engines is:
+
+| Key | URL |
+|---|---|
+| `duckduckgo` *(default)* | `https://duckduckgo.com/?q=` |
+| `brave` | `https://search.brave.com/search?q=` |
+| `startpage` | `https://startpage.com/search?q=` |
+| `mojeek` | `https://www.mojeek.com/search?q=` |
+| `swisscows` | `https://swisscows.com/en/web?query=` |
+| `google` | `https://www.google.com/search?q=` |
+
+Change the active engine in **Settings → Search Engine**.
+
+## Search bangs
+
+Prefix any search with a bang (`!`) to redirect it to a specific site. A few examples:
+
+| Bang | Destination |
+|---|---|
+| `!yt` | YouTube search |
+| `!gh` | GitHub search |
+| `!rd` | Reddit search |
+| `!w` | Wikipedia |
+| `!mdn` | MDN Web Docs |
+| `!npm` | npm |
+| `!so` | Stack Overflow |
+| `!am` | Amazon |
+
+The full bang list is defined in `config.ts` and covers social, reference, shopping, and developer sites.
+
+## Advanced proxy settings
+
+Two toggles under **Settings → Advanced** control proxy runtime behavior:
+
+| Setting | Key | Default | Description |
+|---|---|---|---|
+| Preload Proxy | `preloadProxyRuntime` | `false` | Load the proxy runtime in the background at startup so the first navigation is instant. |
+| Save History | `saveBrowsingHistory` | `true` | Persist your in-proxy browsing history across sessions. |

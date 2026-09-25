@@ -1,0 +1,410 @@
+---
+title: 'CloudSync Service: Encrypted Settings Sync API'
+sidebarTitle: 'CloudSync'
+description: 'API reference for Lyra CloudSync — account registration, JWT auth, AES-256-GCM encrypted settings upload and download, and SQLite-backed storage.'
+---
+
+CloudSync is the Rust/Axum microservice that stores and retrieves encrypted browser settings and bookmarks for Lyra users. The browser encrypts all data with AES-256-GCM before uploading — the server never sees plaintext. Internally, CloudSync re-encrypts the payload server-side using a `SYNC_SECRET`-derived key before writing it to a SQLite database, ensuring data is protected both in transit and at rest.
+
+## Overview
+
+| Property | Value |
+|---|---|
+| **Default port** | `4005` (override with `CLOUDSYNC_PORT`) |
+| **Database** | SQLite at `CLOUDSYNC_DB_PATH`, WAL mode |
+| **WAL checkpoint** | Every 5 minutes (TRUNCATE) |
+| **Password hashing** | Argon2id (19 MB, 2 iterations, 1 thread) |
+| **Session token** | HS256 JWT, 7-day expiry, `HttpOnly` cookie |
+| **Body limit** | RAM-scaled, 16–64 MB (set by `CLOUDSYNC_MEMORY_MB`) |
+
+## Security headers
+
+Every response from CloudSync carries the following headers regardless of endpoint:
+
+```
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+X-XSS-Protection: 1; mode=block
+Referrer-Policy: strict-origin-when-cross-origin
+Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate
+```
+
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `JWT_SECRET` | ✅ | HS256 signing secret, minimum 64 bytes |
+| `SYNC_SECRET` | ✅ | AES key derivation secret, minimum 32 bytes; must differ from `JWT_SECRET` |
+| `CLOUDSYNC_DB_PATH` | | Path to the SQLite database file (default: `.db`) |
+| `CLOUDSYNC_PORT` | | Listening port (default: `4005`) |
+| `CLOUDSYNC_MEMORY_MB` | | Override detected RAM for tuning (minimum `128`) |
+| `COOKIE_SECURE` | | Set to `false` or `0` to issue non-Secure cookies (development only) |
+| `RUST_LOG` | | Log filter (default: `cloudsync=debug,tower_http=debug`) |
+
+---
+
+## Authentication endpoints
+
+All authentication endpoints are nested under `/api/auth/`. JSON request bodies are capped at **2 KB**.
+
+### Register
+
+<ParamField path="POST /api/auth/register" />
+
+Creates a new user account. The password is hashed with Argon2id before storage.
+
+**Rate limit:** 2 req/s, burst 5 (per IP)
+
+<ParamField body="username" type="string" required>
+  3–20 characters. Alphanumeric and underscores only.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  15–128 characters.
+</ParamField>
+
+<CodeGroup>
+```json Request
+{
+  "username": "alice",
+  "password": "my-very-long-passphrase"
+}
+```
+
+```json 201 Created
+{
+  "success": true,
+  "user": {
+    "id": 1,
+    "username": "alice"
+  },
+  "error": null
+}
+```
+
+```json 409 Conflict
+{
+  "success": false,
+  "user": null,
+  "error": "username is unavailable... /ᐠ - ˕ -マ"
+}
+```
+</CodeGroup>
+
+<ResponseField name="success" type="boolean">
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="user" type="object | null">
+  Present on success. Contains `id` (integer) and `username` (string).
+</ResponseField>
+
+<ResponseField name="error" type="string | null">
+  Human-readable error message on failure, `null` on success.
+</ResponseField>
+
+On success the service also sets an `HttpOnly` JWT session cookie (`token`) valid for 7 days.
+
+---
+
+### Login
+
+<ParamField path="POST /api/auth/login" />
+
+Authenticates an existing user and issues a session cookie.
+
+**Rate limit:** 2 req/s, burst 5 (per IP)
+
+<ParamField body="username" type="string" required>
+  The account username.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The account password.
+</ParamField>
+
+<CodeGroup>
+```json Request
+{
+  "username": "alice",
+  "password": "my-very-long-passphrase"
+}
+```
+
+```json 200 OK
+{
+  "success": true,
+  "user": {
+    "id": 1,
+    "username": "alice"
+  },
+  "error": null
+}
+```
+
+```json 401 Unauthorized
+{
+  "success": false,
+  "user": null,
+  "error": "invalid credentials... /ᐠ - ˕ -マ"
+}
+```
+</CodeGroup>
+
+A successful response sets the `token` `HttpOnly` cookie. Constant-time password verification is used regardless of whether the username exists, preventing username enumeration via timing attacks.
+
+<Note>
+  Passwords originally hashed with bcrypt are transparently upgraded to Argon2id on next successful login.
+</Note>
+
+---
+
+### Logout
+
+<ParamField path="POST /api/auth/logout" />
+
+Invalidates the current session by incrementing the account's `token_version` in the database and clearing the session cookie.
+
+**Auth:** JWT cookie  
+**Rate limit:** 20 req/s, burst 100
+
+```json 200 OK
+{
+  "success": true,
+  "user": null,
+  "error": null
+}
+```
+
+---
+
+### Get current user
+
+<ParamField path="GET /api/auth/me" />
+
+Returns basic profile information for the authenticated user.
+
+**Auth:** JWT cookie  
+**Rate limit:** 20 req/s, burst 100
+
+<ResponseField name="id" type="integer">
+  Unique user ID.
+</ResponseField>
+
+<ResponseField name="username" type="string">
+  Account username.
+</ResponseField>
+
+```json 200 OK
+{
+  "success": true,
+  "user": {
+    "id": 1,
+    "username": "alice"
+  },
+  "error": null
+}
+```
+
+---
+
+### Delete account
+
+<ParamField path="DELETE /api/auth/me" />
+
+Permanently deletes the authenticated user's account and all associated sync data. Cascading deletes in SQLite handle the `sync_data` table automatically.
+
+**Auth:** JWT cookie  
+**Rate limit:** 2 req/s, burst 5
+
+```json 200 OK
+{
+  "success": true,
+  "user": null,
+  "error": null
+}
+```
+
+---
+
+## Sync endpoints
+
+All sync endpoints require a valid JWT session cookie and are nested under `/api/sync/`.
+
+### Upload
+
+<ParamField path="POST /api/sync/upload" />
+
+Uploads an encrypted settings snapshot. The previous snapshot for the user is atomically replaced.
+
+**Auth:** JWT cookie  
+**Content-Type:** `application/json`  
+**Content-Encoding:** `identity` (raw) or `gzip`  
+**Body limit:** 16–64 MB (RAM-scaled)  
+**Rate limit:** 2 req/s, burst 10
+
+The raw JSON snapshot must conform to the internal `Snapshot` schema (schema versions 1–3). CloudSync validates the payload structure and rejects uploads that contain credential-like content (JWTs, bearer tokens, API keys, password hashes, and similar) in non-site-scoped storage keys or values. The validated snapshot is then Brotli-compressed and AES-256-GCM-encrypted before being stored.
+
+<ResponseField name="success" type="boolean">
+  `true` when the snapshot was stored.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string">
+  ISO 8601 timestamp of the stored snapshot, suffixed with a random hex token for cache-busting (e.g. `2024-01-15T12:00:00.000Z-a1b2c3d4e5f60718`).
+</ResponseField>
+
+<CodeGroup>
+```json 200 OK
+{
+  "success": true,
+  "data": null,
+  "updated_at": "2024-01-15T12:00:00.000Z-a1b2c3d4e5f60718",
+  "code": null,
+  "error": null
+}
+```
+
+```json 422 Unprocessable Entity
+{
+  "success": false,
+  "data": null,
+  "updated_at": null,
+  "code": "invalid_sync_payload",
+  "error": "invalid sync payload... /ᐠ - ˕ -マ"
+}
+```
+</CodeGroup>
+
+**Error codes**
+
+| `code` | Status | Meaning |
+|---|---|---|
+| `unauthorized` | 401 | Missing or invalid session cookie |
+| `invalid_sync_payload` | 400 / 422 | Malformed JSON or failed validation |
+| `invalid_sync_content_type` | 415 | `Content-Type` is not `application/json` |
+| `invalid_sync_content_encoding` | 415 | `Content-Encoding` is not `identity` or `gzip` |
+| `sync_payload_too_deep` | 400 | JSON nesting exceeds limit |
+| `sync_payload_too_large` | 413 | Payload exceeds body limit |
+| `sync_service_busy` | 503 | Adaptive concurrency gate is at capacity |
+| `sync_service_unavailable` | 500 | Internal error |
+
+---
+
+### Download
+
+<ParamField path="GET /api/sync/download" />
+
+Downloads the stored snapshot for the authenticated user, decrypting and decompressing it before returning.
+
+**Auth:** JWT cookie  
+**Rate limit:** 50 req/s, burst 200
+
+<ResponseField name="success" type="boolean">
+  `true` when a snapshot was found.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  The decrypted `Snapshot` object containing `schemaVersion`, `localStorage`, `sessionStorage`, `cookies`, and `indexedDB`.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string">
+  Timestamp when the snapshot was last written.
+</ResponseField>
+
+```json 200 OK
+{
+  "success": true,
+  "data": {
+    "schemaVersion": 3,
+    "localStorage": {},
+    "sessionStorage": {},
+    "cookies": [],
+    "indexedDB": {}
+  },
+  "updated_at": "2024-01-15T12:00:00.000Z-a1b2c3d4e5f60718",
+  "code": null,
+  "error": null
+}
+```
+
+Returns `404` with code `sync_data_not_found` if no snapshot has been uploaded yet.
+
+---
+
+### Metadata
+
+<ParamField path="GET /api/sync/meta" />
+
+Returns the timestamp of the most recent upload without transferring the full snapshot. The result is cached in-memory for 60 seconds.
+
+**Auth:** JWT cookie  
+**Rate limit:** 50 req/s, burst 200
+
+<ResponseField name="updated_at" type="string">
+  ISO 8601 timestamp of the latest upload, or an empty string if no data exists.
+</ResponseField>
+
+```json 200 OK
+{
+  "success": true,
+  "data": null,
+  "updated_at": "2024-01-15T12:00:00.000Z-a1b2c3d4e5f60718",
+  "code": null,
+  "error": null
+}
+```
+
+---
+
+## Service metrics
+
+<ParamField path="GET /api/auth/metrics" />
+
+Returns internal adaptive gate statistics for both the auth and sync work queues. No authentication required.
+
+```json 200 OK
+{
+  "auth": {
+    "active": 0,
+    "limit": 4,
+    "minimum": 1,
+    "maximum": 8,
+    "peak": 2,
+    "waits": 0,
+    "rejected": 0
+  },
+  "sync": {
+    "active": 1,
+    "limit": 4,
+    "minimum": 1,
+    "maximum": 8,
+    "peak": 3,
+    "waits": 0,
+    "rejected": 0
+  }
+}
+```
+
+<ResponseField name="active" type="integer">
+  Requests currently being processed.
+</ResponseField>
+
+<ResponseField name="limit" type="integer">
+  Current concurrency limit set by the adaptive gate.
+</ResponseField>
+
+<ResponseField name="peak" type="integer">
+  Highest concurrency observed since startup.
+</ResponseField>
+
+<ResponseField name="rejected" type="integer">
+  Requests rejected because the gate was full (HTTP 503).
+</ResponseField>
+
+---
+
+## Health check
+
+`GET /health` returns `200 oki` when the service is running and a database connection is available, or `503 oki` if the connection pool is exhausted.
+
+`GET /` returns a plain-text status message.
