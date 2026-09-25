@@ -104,7 +104,7 @@ Folio's rewriting pipeline transforms responses so all URLs and APIs reference t
     - Strips `<meta http-equiv="Content-Security-Policy">` tags (replacing them with HTML comments) to prevent the origin's CSP from blocking the proxy's injected scripts.
     - Rewrites `<meta http-equiv="refresh">` redirect URLs.
     - Updates `<base href>` to track the effective base URL for subsequent relative URL resolution.
-    - Injects the Folio client scripts (`folio.js`, WASM loader, `inject.js`, and a data-URL inline bootstrap) at the top of `<head>`, or at position 0 of the document root for quirky non-standard document structures.
+    - Injects the Folio client scripts (`folio.js`, WASM loader (`folio.wasm.js`), `controller.inject.js`, and a data-URL inline bootstrap) at the top of `<head>`, or at position 0 of the document root for quirky non-standard document structures.
   </Accordion>
   <Accordion title="CSS rewriter">
     Scans CSS text for `url(...)` declarations and rewrites each URL through `rewriteUrl`. Handles quoted and unquoted values, resolves relative URLs against the current base, and leaves `data:` and `#fragment` values untouched.
@@ -127,7 +127,7 @@ Folio's rewriting pipeline transforms responses so all URLs and APIs reference t
 
 ## Client-Side DOM Patches
 
-When Folio injects scripts into an HTML page, the **`inject.js`** bootstrap runs before any page script and patches the following browser APIs so that proxied pages behave correctly:
+When Folio injects scripts into an HTML page, the **`controller.inject.js`** bootstrap runs before any page script and patches the following browser APIs so that proxied pages behave correctly:
 
 <CardGroup cols={2}>
   <Card title="Location & History" icon="map-pin">
@@ -143,7 +143,7 @@ When Folio injects scripts into an HTML page, the **`inject.js`** bootstrap runs
     `window.Worker`, `window.SharedWorker` — script URLs are rewritten so workers also run within the proxy scope.
   </Card>
   <Card title="DOM property setters" icon="code">
-    `HTMLIFrameElement.src`, `HTMLImageElement.src`, `HTMLScriptElement.src`, `HTMLLinkElement.href`, `HTMLObjectElement.data`, and `Element.prototype.setAttribute` — all intercepted to rewrite assigned URLs.
+    `HTMLIFrameElement.src`, `HTMLImageElement.src`, `HTMLScriptElement.src`, `HTMLSourceElement.src`, `HTMLMediaElement.src`, `HTMLEmbedElement.src`, `HTMLObjectElement.data`, `HTMLLinkElement.href`, and `Element.prototype.setAttribute` — all intercepted to rewrite assigned URLs.
   </Card>
   <Card title="Cookie & Storage" icon="database">
     Cookie reads/writes are mediated by Folio's `CookieJar` to maintain per-origin cookie state across the proxy. HttpOnly cookies are synced separately between the service worker and the controller.
@@ -184,3 +184,7 @@ Folio's runtime behaviour is controlled by `FolioConfig.flags`, which can be ove
 | `debugTrampolines` | `false` | Insert debug assertions into rewritten trampolines |
 | `syncxhr` | `false` | Allow synchronous XHR through the proxy |
 | `disableComputedWrap` | `false` | Disable computed property rewriting |
+| `cleanErrors` | `false` | Sanitise error stack traces to remove proxy internals |
+| `scramitize` | `false` | Enable additional identifier scrambling in rewritten output |
+| `allowFailedIntercepts` | `false` | Silently skip DOM patches that fail instead of throwing |
+| `debugSourceURL` | `false` | Append `//# sourceURL` comments to rewritten scripts |

@@ -1,17 +1,13 @@
 ---
-title: 'Cloud Sync: Encrypted Settings and Bookmark Backup'
+title: 'Cloud Sync: Back Up Settings and Bookmarks in Lyra'
 sidebarTitle: 'Cloud Sync'
-description: 'Lyra Cloud Sync stores bookmarks and settings in an encrypted SQLite database on your server. Accounts are local to your instance with JWT auth.'
+description: 'Lyra Cloud Sync backs up bookmarks, settings, and browser state to your own server. Accounts are local to your instance with no third-party sign-in.'
 ---
 
-Cloud Sync lets you back up and restore your Lyra bookmarks, settings, and browser state across devices. All data is stored on your own server in a SQLite database — there is no external cloud service involved. Accounts are local to your Lyra instance and require no third-party sign-in.
-
-## How encryption works
-
-The sync snapshot is encrypted **in the browser** using AES-256-GCM before it is sent to the server. The server stores only the ciphertext and never processes plaintext data. The encryption key is derived from the `SYNC_SECRET` environment variable via SHA-256, and JWT sessions are signed with `JWT_SECRET`.
+Cloud Sync lets you back up and restore your Lyra bookmarks, settings, and browser state across devices. All data is stored on your own server — there is no external cloud service involved. Accounts are local to your Lyra instance and require no third-party sign-in.
 
 <Note>
-  Because encryption happens client-side, losing your password means losing access to your sync data permanently. Store your password in a safe place.
+  All account data and sync snapshots are deleted permanently when you delete your account. Store your password in a safe place — there is no recovery mechanism.
 </Note>
 
 ## API endpoints
@@ -34,21 +30,11 @@ Cloud Sync exposes two groups of endpoints on your Lyra instance.
 |---|---|---|
 | `POST` | `/api/sync/upload` | Upload an encrypted sync snapshot |
 | `GET` | `/api/sync/download` | Download the latest encrypted snapshot |
-| `GET` | `/api/sync/meta` | Return sync metadata (`size`, `updated_at`) |
-
-## Rate limits
-
-The endpoints are rate-limited to prevent abuse:
-
-| Endpoint group | Rate limit |
-|---|---|
-| `register`, `login`, `DELETE /api/auth/me` | 2 req/s, burst 5 |
-| `POST /api/sync/upload` | 2 req/s, burst 10 |
-| `GET /api/sync/download`, `GET /api/sync/meta` | 50 req/s, burst 200 |
+| `GET` | `/api/sync/meta` | Return sync metadata (`updated_at`) |
 
 ## Storage
 
-Sync data is persisted in a SQLite database at `services/cloudsync/.db` on your server. Each user account has a single stored snapshot (the most recent upload).
+Sync data is persisted server-side. Each user account has a single stored snapshot (the most recent upload).
 
 ## Sync behavior
 

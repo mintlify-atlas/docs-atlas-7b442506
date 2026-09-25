@@ -1,5 +1,5 @@
 ---
-title: "Lyra Architecture: How Proxy, Tunnel, and Rewriter Fit Together"
+title: "Lyra Architecture: Proxy, Tunnel, and Rewriter Overview"
 sidebarTitle: "Overview"
 description: "A high-level walkthrough of how Lyra's Mochi proxy, Nuru WebSocket tunnel, Folio service worker, and backend services interact to proxy web requests."
 ---
@@ -131,7 +131,7 @@ Every 2 seconds, the rebalancer reads available RAM from `/proc/meminfo` and the
 
 - **Memory pressure** — if available RAM shrinks, permit limits are reduced so in-flight work doesn't exhaust memory.
 - **CPU load** — gates classified as `Workload::Cpu` or `Workload::Mixed` also factor in normalized CPU load, while `Workload::Io` gates are bounded only by memory.
-- **Graduated growth** — limits can be cut immediately but grow only by one quarter of the gap per tick, preventing oscillation.
+- **Graduated changes** — limits drop at most halfway toward the minimum per tick and grow by at most one quarter of the remaining gap per tick, preventing oscillation in both directions.
 
 <Info>
   You can observe the current gate state for Mochi at any time by calling `GET /metrics` on any Mochi worker. The response includes `capacity.active`, `capacity.limit`, `capacity.minimum`, `capacity.maximum`, `capacity.peak`, `capacity.waits`, and `capacity.rejected` fields for the main request gate.

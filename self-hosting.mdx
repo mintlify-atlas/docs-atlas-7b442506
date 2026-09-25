@@ -1,5 +1,5 @@
 ---
-title: "Deploy Lyra on Your Own Server"
+title: "Self-Hosting Lyra: Deploy on Your Own Linux Server"
 sidebarTitle: "Self-Hosting"
 description: "Step-by-step guide to deploy Lyra on a Debian or Ubuntu server using the automated setup.sh script with systemd, Caddy, and optional WireGuard VPN."
 ---
@@ -44,7 +44,7 @@ Before running the setup script, confirm your server meets these requirements:
     bash setup.sh
     ```
 
-    The script detects your CPU count and total RAM to automatically pick sensible values for `MOCHI_INSTANCES` and `NURU_INSTANCES`. You can override these before running:
+    The script detects your CPU count and total RAM to automatically pick sensible values for `MOCHI_INSTANCES` and `NURU_INSTANCES`. The formula is `CPU count / 2`, bounded by `RAM (MB) / 2048`, with a minimum of 1 and a maximum of 32. You can override these before running:
 
     ```bash
     MOCHI_INSTANCES=4 NURU_INSTANCES=4 bash setup.sh
@@ -61,13 +61,15 @@ Before running the setup script, confirm your server meets these requirements:
     When the script detects an interactive terminal it will prompt you to route Mochi and Nuru traffic through a WireGuard VPN. This keeps your server's real IP hidden from upstream sites proxied by Lyra.
 
     ```
-    > route mochi and nuru through a wireguard vpn? (y/n)
+    [setup] route mochi and nuru through a wireguard vpn?
+    [setup] type 'y' to configure wireguard or 'n' to use the server's direct connection
+    > 
     ```
 
     - **`y`** — You will be prompted to paste your WireGuard config into `nano`. The script validates it, strips IPv6 addresses (which Lyra disables at the kernel level), adjusts the MTU, and installs it to `/etc/wireguard/wg0.conf`.
     - **`n`** — Mochi and Nuru connect directly through your server's default route. You can enable WireGuard later by re-running `setup.sh`.
 
-    For non-interactive deployments (e.g. CI or cloud-init), set the environment variable before running:
+    For non-interactive deployments (e.g. CI or cloud-init), set the environment variable before running. This requires an existing `/etc/wireguard/wg0.conf` — the script will not prompt for a config in non-interactive mode:
 
     ```bash
     LYRA_WIREGUARD=yes bash setup.sh   # uses existing /etc/wireguard/wg0.conf
@@ -120,7 +122,8 @@ All health checks return `oki` with HTTP 200 when the service is healthy, or HTT
 | `/nuru/health` | Nuru WebSocket tunnel (load-balanced) |
 | `/cloudsync/health` | CloudSync service |
 | `/isao/health` | Isao anime metadata |
-| `/eturnal/health` | eturnal TURN server (TCP probe) |
+| `/eturnal/health` | eturnal TURN server (TCP probe via Lyra app) |
+| `/tls-approval/health` | TLS approval gate |
 
 ## Environment Variables
 
@@ -128,13 +131,13 @@ The following environment variables can be set before running `setup.sh` to over
 
 | Variable | Default | Description |
 |---|---|---|
-| `MOCHI_INSTANCES` | auto (CPU / RAM) | Number of Mochi reverse-proxy worker processes. Must be 1–32. |
-| `NURU_INSTANCES` | auto (CPU / RAM, max 18) | Number of Nuru WebSocket tunnel worker processes. Must be 1–32. |
+| `MOCHI_INSTANCES` | `CPU count / 2`, bounded by `RAM (MB) / 2048` | Number of Mochi reverse-proxy worker processes. Must be 1–32. |
+| `NURU_INSTANCES` | same formula as Mochi, capped at 18 | Number of Nuru WebSocket tunnel worker processes. Must be 1–32. |
 | `TURN_HOST` | auto-detected public IP | Hostname advertised to WebRTC clients for the TURN server. |
 | `TURN_PORT` | `3478` | UDP/TCP port for the eturnal TURN server. |
 | `TURN_USERNAME` | `lyly` | TURN credential username. |
-| `TURN_CREDENTIAL` | random (openssl) | TURN credential password. Auto-generated on first run. |
-| `LYRA_WIREGUARD` | `no` | Set to `yes` to enable WireGuard non-interactively (requires existing `/etc/wireguard/wg0.conf`). |
+| `TURN_CREDENTIAL` | random (`openssl rand -hex 24`) | TURN credential password. Auto-generated on each run if not set. |
+| `LYRA_WIREGUARD` | `no` | Set to `yes` (or `1`/`true`/`y`) to enable WireGuard non-interactively (requires existing `/etc/wireguard/wg0.conf`). |
 
 ## Firewall
 

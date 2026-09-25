@@ -1,7 +1,7 @@
 ---
 title: 'Nuru TOML Configuration Reference'
 sidebarTitle: 'Nuru Config'
-description: 'Complete reference for Nuru's config.toml: server bind, transport, Wisp protocol settings, stream options, DNS, and host/port access control lists.'
+description: "Complete reference for Nuru's config.toml: server bind, transport, Wisp protocol settings, stream options, DNS, and host/port access control lists."
 ---
 
 Nuru is Lyra's WebSocket proxy service, implementing the [Wisp protocol](https://github.com/MercuryWorkshop/wisp-protocol). Its behaviour is driven entirely by a TOML file — one copy per instance — installed to `/etc/nuru/config-N.toml` by `setup.sh`. The source template at `services/nuru/config.toml` is patched at deploy time: the `[wisp] prefix` is replaced with a random 64-character hex path, and `websocket_origin_scheme = "https"` is injected under `[server]`.
@@ -53,7 +53,7 @@ block_ports = []
 ```
 
 <Note>
-  `setup.sh` overwrites `prefix` with a random hex path (e.g. `/a3f8…c2/`) and appends `websocket_origin_scheme = "https"` on every deploy. The per-instance files at `/etc/nuru/config-N.toml` also have `bind` rewritten to `127.0.0.1:420N`.
+  `setup.sh` overwrites `prefix` with a random hex path (e.g. `/a3f8…c2/`) and appends `websocket_origin_scheme = "https"` on every deploy. The per-instance files at `/etc/nuru/config-N.toml` also have `bind` rewritten to `127.0.0.1:4200+N`.
 </Note>
 
 ---
@@ -64,11 +64,11 @@ Controls the listening socket, wire transport, and process runtime.
 
 <ParamField body="bind" type="[string, string]" default='["tcp", "127.0.0.1:4001"]'>
   A two-element array: socket type and address. Socket type may be `tcp`, `tlstcp`, `unix`, or `tlsunix`. For `tcp`/`tlstcp` the address is `host:port`; for Unix sockets it is a filesystem path.
-  `setup.sh` overwrites this to `["tcp", "127.0.0.1:420N"]` for instance N.
+  `setup.sh` overwrites this to `["tcp", "127.0.0.1:4200+N"]` for instance N.
 </ParamField>
 
 <ParamField body="transport" type="string" default="websocket">
-  Wire framing used by Nuru clients. `websocket` is the standard choice for browser clients. The alternative `lengthdelimitedlc` is a raw length-prefixed framing suitable for native clients.
+  Wire framing used by Nuru clients. `websocket` is the standard choice for browser clients. The alternative `lengthdelimitedle` is a raw length-prefixed framing suitable for native clients.
 </ParamField>
 
 <ParamField body="resolve_ipv6" type="boolean" default="false">
@@ -281,6 +281,6 @@ When `setup.sh` installs configs it applies the following patches to the source 
 | `[server] websocket_origin_scheme` | Injected as `"https"` |
 | `[wisp] prefix` | Replaced with random 64-hex-char path |
 | `[stream] dns_servers` | Replaced with VPN DNS servers (WireGuard mode only) |
-| `[server] bind` | Rewritten per-instance to `127.0.0.1:420N` |
+| `[server] bind` | Rewritten per-instance to `127.0.0.1:4200+N` |
 
 The final installed configs are owned by the `nuru` system user (`chown -R nuru:nuru /etc/nuru`).

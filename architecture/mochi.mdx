@@ -1,5 +1,5 @@
 ---
-title: "Mochi: Rust Reverse Proxy with Multi-Tier Caching"
+title: "Mochi: Rust Reverse Proxy with Adaptive Concurrency"
 sidebarTitle: "Mochi"
 description: "How Mochi proxies web requests for Lyra, including in-memory Moka caches, disk-based stream caching, adaptive concurrency gates, and HTML/JS rewriting."
 ---
@@ -30,7 +30,7 @@ Mochi maintains three separate `reqwest::Client` instances, each tuned for a dif
     Used for images, scripts, fonts, JSON, and all other non-HTML responses. Has a **60-second read timeout**, a larger per-host pool (`pool_idle_per_host_asset = cores × 3`, capped at 32), and also follows public redirects.
   </Accordion>
   <Accordion title="raw_client — no-redirect raw proxy">
-    Used exclusively for `/!!raw/*` routes. Configured with `Policy::none()` so redirects are **never** followed — the redirect response is passed back verbatim to the caller, which uses it to implement its own redirect handling.
+    Used exclusively for `/!!raw/*` routes. Configured with `Policy::none()` so redirects are **never** followed — the redirect response is passed back verbatim to the caller, which uses it to implement its own redirect handling. Has a **120-second read timeout** (not 60 s), allowing large raw responses to stream completely before the connection closes.
   </Accordion>
 </AccordionGroup>
 

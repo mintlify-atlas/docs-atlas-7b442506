@@ -1,7 +1,7 @@
 ---
-title: "Run Lyra Locally for Development"
+title: "Lyra Local Development: Run the Proxy on Your Machine"
 sidebarTitle: "Local Dev"
-description: "Set up a local Lyra development environment using Bun. Build proxy bundles and start the hot-reload dev server in two commands."
+description: "Set up a local Lyra dev environment with Bun 1.4.2. Build proxy bundles and launch the hot-reload dev server with all backend services in one command."
 ---
 
 Lyra's development server combines a Vite HMR frontend, an Express middleware layer, and automatic startup of all backend Rust services (Mochi, Nuru, CloudSync, Isao, and a Docker-based TURN server) in a single command. Within seconds of running `bun dev` you have a fully functional proxy stack with hot-reloading on every source change.
@@ -70,13 +70,13 @@ The main app listens on **port 4444** by default. Open `http://localhost:4444` i
 
 ### Web Only (Skip Backend Autostart)
 
-If you only want the Vite + Express frontend without spinning up the Rust backend services — for example when working purely on UI — set `DEV_AUTOSTART=0`:
+If you only want the Vite + Express frontend without spinning up the Rust backend services — for example when working purely on UI — use the `dev:web` script:
 
 ```bash
 bun run dev:web
 ```
 
-This is equivalent to running `bun dev` with `DEV_AUTOSTART=0`. The proxy routes for Mochi, Nuru, CloudSync, and Isao will return errors until those services are started separately, but the UI, HMR, and static asset serving all work normally.
+This sets `DEV_AUTOSTART=0`, which skips spawning all backend services. The proxy routes for Mochi, Nuru, CloudSync, and Isao will return errors until those services are started separately, but the UI, HMR, and static asset serving all work normally.
 
 ## Available Scripts
 
@@ -86,13 +86,16 @@ All scripts are defined in `package.json` and run with `bun run <script>`.
 |---|---|
 | `bun dev` | Build proxy bundles then start the hot-reload dev server with all backend services. |
 | `bun run dev:web` | Build proxy bundles then start the dev server with backend autostart disabled (`DEV_AUTOSTART=0`). |
+| `bun run dev:turn` | Start only the Docker-based TURN server via `docker compose -f services/turn/compose.yml up`. |
 | `bun run build` | Full production build: compiles proxy bundles, runs Vite (Terser minification, LightningCSS), and runs the post-build audit. |
+| `bun run start` | Run `build` then start the production server (`server/prod.mjs`) with `NODE_ENV=production`. |
 | `bun run build-folio` | Build only the Folio service-worker bundle (requires Rust nightly + wasm-bindgen). |
 | `bun run build-rivet` | Build only the Rivet Chrome extension runtime bundle. |
 | `bun run build-proxy` | Runs `build-folio` then `build-rivet`. Called automatically by `dev` and `build`. |
 | `bun run typecheck` | TypeScript type-checking across all packages — the main app, Rivet, and Folio (all sub-packages). |
 | `bun run lint` | Run ESLint across the entire codebase. |
 | `bun run audit-build` | Post-build audit script that validates the contents of `dist/`. Run automatically at the end of `bun run build`. |
+| `bun run bench:backend` | Run the backend load benchmark script. |
 
 ## Dev Server Port Map
 

@@ -1,7 +1,7 @@
 ---
 title: 'Free Anime Streaming in Lyra'
 sidebarTitle: 'Anime'
-description: 'How Lyra streams anime via HLS through Mochi stream cache, episode resolution through Isao, and the in-browser player with quality selection.'
+description: 'How Lyra streams anime via HLS through Mochi stream cache, episode resolution through Anikoto, and the in-browser player with quality selection.'
 ---
 
 Lyra includes a fully integrated anime streaming feature powered by the **Anikoto** provider, with metadata enriched from AniList and MyAnimeList. Streams are proxied as HLS through Mochi's stream cache, meaning everything — catalog, episodes, and video — flows through your own server without touching a third-party relay.
@@ -20,24 +20,24 @@ When you open an anime and press play, Lyra follows a multi-step resolution pipe
   <Step title="Fetch episode list">
     Episode data is retrieved from Anikoto's series endpoint and cached in-memory for 10 minutes. Each episode record includes its number, optional title, and available languages (`sub` / `dub`).
   </Step>
-  <Step title="Resolve the stream URL">
-    Lyra calls `POST /api/anime/resolve-stream` with the selected episode number and language. The server returns a `mochi_url` pointing to Mochi's HLS stream cache.
+  <Step title="Build the playback URL">
+    Lyra calls `buildAnimePlaybackUrl` with the selected episode number, language, season, and resolved IDs. This constructs a `/stream/anime?…` URL that the player component navigates to.
   </Step>
   <Step title="Play via HLS player">
-    The in-browser HLS player loads the `mochi_url`. Adaptive bitrate streaming is active by default; manual quality selection is also available.
+    The in-browser HLS player loads the stream. Adaptive bitrate streaming is active by default; manual quality selection is also available.
   </Step>
 </Steps>
 
 ## Metadata sources
 
-Lyra merges anime metadata from three providers, ranked by priority:
+Lyra merges anime metadata from multiple providers, ranked by priority:
 
 | Provider | Priority | Used for |
 |---|---|---|
-| Jikan (MyAnimeList) | Highest | Episode counts, canonical metadata |
-| AniList | High | Trending/popular catalogs, cover images, scores |
-| Kitsu | Medium | Fallback catalog, episode counts |
-| Anikoto | Base | Stream URLs, episode availability, recent anime |
+| AniList | Highest (live catalog) | Trending/popular catalogs, cover images, scores, episode counts |
+| Kitsu | High | Fallback catalog and episode counts |
+| Anikoto | Base | Recent anime feed, episode list, stream availability |
+| Server (`/api/anime/episodes/`) | Episode count fallback | MAL-backed episode count lookup when other sources lack data |
 
 Results from all providers are merged by shared provider IDs (AniList ID, MAL ID, Kitsu ID, Anikoto ID). Duplicate entries are collapsed; episode counts are taken from the highest-priority source that has a confirmed value.
 
@@ -63,7 +63,7 @@ The HLS player uses **adaptive bitrate (ABR)** by default, automatically selecti
 | Setting | Behavior |
 |---|---|
 | `auto` | ABR — adjusts dynamically |
-| `1080p` / `720p` / `480p` / `360p` | Pins to the closest available level at or below the target height |
+| `1080p` / `720p` / `360p` | Pins to the closest available level at or below the target height |
 
 If no level at or below the target exists, the player falls back to the lowest available level. Quality selection is powered by `hlsQuality.ts` and applied directly to the `hls.currentLevel` property of the HLS.js instance.
 

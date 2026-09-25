@@ -29,7 +29,7 @@ Rivet emulates the following Chrome extension APIs:
     Messaging between background scripts and content scripts, lifecycle events (`onInstalled`, `onStartup`), and cross-extension messaging.
   </Card>
   <Card title="webRequest" icon="network-wired">
-    Network request hooks (`onBeforeRequest`, `onBeforeSendHeaders`, `onHeadersReceived`, `onCompleted`, `onBeforeRedirect`). Events are dispatched by the DNR plugin for every proxied fetch.
+    Network request hooks (`onBeforeRequest`, `onBeforeSendHeaders`, `onSendHeaders`, `onHeadersReceived`, `onCompleted`, `onErrorOccurred`, `onBeforeRedirect`). Events are dispatched by the DNR plugin for every proxied fetch.
   </Card>
 </CardGroup>
 

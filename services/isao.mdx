@@ -206,19 +206,15 @@ Cross-references any combination of provider IDs (or a title) to produce a unifi
 The resolver queries Anikoto, AniList, and Jikan in parallel, then enriches the result through Kitsu mappings. Title-based search falls back to AniList search followed by Kitsu when needed.
 
 <ParamField body="anilist_id" type="integer">
-  AniList ID.
+  AniList ID (also accepted as `anilistId`).
 </ParamField>
 
 <ParamField body="mal_id" type="integer">
-  MyAnimeList ID.
-</ParamField>
-
-<ParamField body="anikoto_episode_id" type="string">
-  Anikoto episode ID string.
+  MyAnimeList ID (also accepted as `malId`).
 </ParamField>
 
 <ParamField body="ids" type="object">
-  Object with any combination of provider ID fields: `anilist`, `mal`, `anidb`, `kitsu`, `tmdb`, `tmdbSeason`, `imdb`, `tvdb`, `tvdbSeason`, `animePlanet`, `liveChart`, `animeNewsNetwork`, `aniSearch`, `simkl`, `animeCountdown`, `anikoto`, `anikotoEpisode`.
+  Object with any combination of provider ID fields: `anilist`, `mal`, `anidb`, `kitsu`, `tmdb`, `tmdbSeason`, `imdb`, `tvdb`, `tvdbSeason`, `animePlanet`, `liveChart`, `animeNewsNetwork`, `aniSearch`, `simkl`, `animeCountdown`, `anikoto`, `anikotoEpisode`. Use `ids.anikotoEpisode` to pass an Anikoto episode ID.
 </ParamField>
 
 <ParamField body="title" type="string">
@@ -227,6 +223,10 @@ The resolver queries Anikoto, AniList, and Jikan in parallel, then enriches the 
 
 <ParamField body="year" type="integer">
   Release year, used to disambiguate title searches.
+</ParamField>
+
+<ParamField body="season" type="string">
+  Broadcast season (e.g. `SPRING`, `FALL`), used to disambiguate title searches.
 </ParamField>
 
 <ParamField body="format" type="string">
@@ -318,19 +318,19 @@ The resolver queries Anikoto, AniList, and Jikan in parallel, then enriches the 
 Generates a Mochi-compatible stream URL for the Anikoto provider. Does not make upstream network calls — the URL is assembled from the provided IDs.
 
 <ParamField body="anilist_id" type="integer">
-  AniList ID of the anime.
+  AniList ID of the anime (also accepted as `anilistId`).
 </ParamField>
 
 <ParamField body="mal_id" type="integer">
-  MAL ID of the anime.
+  MAL ID of the anime (also accepted as `malId`).
 </ParamField>
 
-<ParamField body="anikoto_episode_id" type="string">
-  Direct Anikoto episode ID. Bypasses ID normalization when provided.
+<ParamField body="ids" type="object">
+  Object containing provider IDs. Pass `ids.anikotoEpisode` to supply a direct Anikoto episode ID, which bypasses the need for an anime ID and episode number.
 </ParamField>
 
 <ParamField body="episode" type="integer" required>
-  Episode number. Must be greater than 0 unless `anikoto_episode_id` is provided.
+  Episode number. Must be greater than 0 unless `ids.anikotoEpisode` is provided.
 </ParamField>
 
 <ParamField body="language" type="string">

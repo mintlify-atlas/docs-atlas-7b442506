@@ -24,8 +24,10 @@ WireGuard routing in Lyra is implemented with Linux policy routing rather than t
 4. **fwmark bypass** — WireGuard itself sets an `FwMark` on packets it generates (the VPN keepalive and handshake traffic). A higher-priority rule (priority 500) sends fwmark'd packets back to the `main` table so they route via the physical interface, preventing a routing loop:
 
    ```
-   500: from all fwmark <wg-fwmark> lookup main
+   500: from all fwmark 0xca6c lookup main
    ```
+
+   `setup.sh` reads the `FwMark` value from your `wg0.conf`; if no `FwMark` line is present it falls back to `0xca6c`.
 
 5. **DNS** — Any `DNS =` lines in the WireGuard config are commented out (prefixed `# LyraVPNDNS`) during install so the host resolver is unchanged. Nuru uses its own `dns_servers` setting in `config.toml` (see [Nuru Config](/configuration/nuru-config)); `setup.sh` injects the VPN DNS servers into that list automatically.
 
@@ -107,7 +109,7 @@ The `/etc/wireguard/wg0.conf` file is left in place in case you want to re-enabl
 | Unit | Purpose |
 |---|---|
 | `wg-quick@wg0.service` | Brings up the `wg0` WireGuard interface on boot |
-| `nuru-route.service` | One-shot service that runs `nuru-route.sh` (invoked by the timer) |
+| `nuru-route.service` | One-shot service; `ExecStart` uses `flock /run/lyra-vpn-route.lock` to serialize concurrent runs of `nuru-route.sh` |
 | `nuru-route.timer` | Fires `nuru-route.service` 30 s after boot and every 60 s thereafter |
 
 The `nuru@N.service` and `mochi@N.service` units both declare `After=wg-quick@wg0.service` and run `nuru-route.sh` as an `ExecStartPre` step when WireGuard is active, ensuring routing is applied before any proxy connection is accepted.

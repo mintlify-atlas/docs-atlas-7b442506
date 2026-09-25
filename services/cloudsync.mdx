@@ -1,5 +1,5 @@
 ---
-title: 'CloudSync Service: Encrypted Settings Sync API'
+title: 'CloudSync Service: Encrypted Browser Settings Sync API'
 sidebarTitle: 'CloudSync'
 description: 'API reference for Lyra CloudSync — account registration, JWT auth, AES-256-GCM encrypted settings upload and download, and SQLite-backed storage.'
 ---
@@ -362,6 +362,8 @@ Returns the timestamp of the most recent upload without transferring the full sn
 
 Returns internal adaptive gate statistics for both the auth and sync work queues. No authentication required.
 
+**Rate limit:** 20 req/s, burst 100 (per IP)
+
 ```json 200 OK
 {
   "auth": {
@@ -405,6 +407,6 @@ Returns internal adaptive gate statistics for both the auth and sync work queues
 
 ## Health check
 
-`GET /health` returns `200 oki` when the service is running and a database connection is available, or `503 oki` if the connection pool is exhausted.
+`GET /health` returns `200 oki` when the service is running and a database connection is available, or `503 oki` if the connection pool is unavailable.
 
 `GET /` returns a plain-text status message.

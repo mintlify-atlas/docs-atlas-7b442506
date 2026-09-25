@@ -86,9 +86,10 @@ The full bang list is defined in `config.ts` and covers social, reference, shopp
 
 ## Advanced proxy settings
 
-Two toggles under **Settings → Advanced** control proxy runtime behavior:
+Three settings under **Settings → Advanced** control proxy runtime behavior and UI motion:
 
 | Setting | Key | Default | Description |
 |---|---|---|---|
 | Preload Proxy | `preloadProxyRuntime` | `false` | Load the proxy runtime in the background at startup so the first navigation is instant. |
 | Save History | `saveBrowsingHistory` | `true` | Persist your in-proxy browsing history across sessions. |
+| Motion Preference | `motionPreference` | `"system"` | Animation motion level: `"system"` (follow OS setting), `"reduced"`, or `"full"`. |

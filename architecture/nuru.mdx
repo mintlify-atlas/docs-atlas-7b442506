@@ -1,5 +1,5 @@
 ---
-title: "Nuru: Wisp v2 WebSocket Tunnel Server"
+title: "Nuru: Wisp v2 Tunnel Server for TCP and UDP Proxying"
 sidebarTitle: "Nuru"
 description: "How Nuru handles WebSocket-to-TCP/UDP tunneling for Lyra using the Wisp v2 protocol, thread-per-core runtime, and adaptive connection gates."
 ---
@@ -39,7 +39,7 @@ Nuru's Wisp handshake advertises the following extensions, each enabled independ
 
 ## Thread-per-Core Runtime
 
-Nuru is configured with `runtime = "threadpercore"` in the default `config.toml`. When this mode is active and the socket type is TCP (not Unix), Nuru spawns **one `tokio` runtime shard per CPU core**, each with its own `ServerListener`. This allows the kernel to distribute incoming TCP connections across all cores using `SO_REUSEPORT`, eliminating the accept lock bottleneck present in single-listener designs.
+Nuru is configured with `runtime = "threadpercore"` in the default `config.toml`. When this mode is active and the socket type is `tcp` or `tls-tcp` (not Unix or file), Nuru spawns **one `tokio` runtime shard per CPU core**, each with its own `ServerListener`. This allows the kernel to distribute incoming TCP connections across all cores using `SO_REUSEPORT`, eliminating the accept lock bottleneck present in single-listener designs.
 
 ```toml
 # config.toml
@@ -105,10 +105,10 @@ Buffer sizes themselves are RAM-adaptive (from `nuru::tuning`):
 Nuru uses **Hickory DNS** (`hickory-resolver`) by default, providing caching and parallel query support. The resolver is initialised once at startup:
 
 - If `stream.dns_servers` is **empty** in `config.toml`, Nuru reads the system resolver configuration (`/etc/resolv.conf` on Linux) and wraps it in a Hickory `TokioResolver`.
-- If `stream.dns_servers` is provided (e.g., `["1.1.1.1", "1.0.0.1", "8.8.8.8"]`), a custom Hickory resolver is built from those addresses.
+- If `stream.dns_servers` is provided (e.g., `["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]`), a custom Hickory resolver is built from those addresses.
 - If reading the system configuration fails, Nuru logs a warning and falls back to `tokio::net::lookup_host` (system resolver, no caching).
 
-The resolve cache has a configurable TTL (`wisp.resolve_cache_ttl_secs`, default 300 s) and a RAM-adaptive maximum entry count (`total_ram_mb × 4`, clamped to 10,000 – 100,000 entries).
+The resolve cache has a configurable TTL (`wisp.resolve_cache_ttl_secs`; set to 300 s in the default `config.toml`) and a RAM-adaptive maximum entry count (`total_ram_mb × 4`, clamped to 10,000 – 100,000 entries).
 
 ## Configuration Reference
 

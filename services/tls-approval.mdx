@@ -1,5 +1,5 @@
 ---
-title: 'TLS Approval Service for On-Demand Certificates'
+title: 'TLS Approval Service for Caddy On-Demand Certificates'
 sidebarTitle: 'TLS Approval'
 description: "How Lyra's tls-approval Node.js service validates Caddy's on-demand TLS certificate requests, rejecting certificates for unauthorized hostnames."
 ---
@@ -110,8 +110,8 @@ This is the endpoint Caddy calls. Both `domain` and `server_name` query paramete
 | `no... /ᐠ - ˕ -マ` | `410` | Domain denied (blocked suffix or denial cache hit) |
 | `missing domain... /ᐠ - ˕ -マ` | `400` | No domain parameter in the request |
 | `invalid domain... /ᐠ - ˕ -マ` | `400` | Domain failed syntax validation |
-| `domain temporarily banned... /ᐠ - ˕ -マ` | `429` | Per-domain rate limit exceeded |
-| `domain rate limited... /ᐠ - ˕ -マ` | `429` | Per-domain request limit hit (triggers ban) |
+| `domain temporarily banned... /ᐠ - ˕ -マ` | `429` | Domain is currently serving a ban period |
+| `domain rate limited... /ᐠ - ˕ -マ` | `429` | Per-domain request limit exceeded; ban now triggered |
 | `temporarily unavailable... /ᐠ - ˕ -マ` | `503` | Global rate limit exceeded |
 
 ### Health check

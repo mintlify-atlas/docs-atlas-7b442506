@@ -116,8 +116,8 @@ CloudSync is launched by PM2 from `services/cloudsync/target/release/cloudsync`.
 
 ## Isao
 
-<ParamField body="ISAO_PORT" type="number" default="6001">
-  Port the Isao anime metadata API service binds on. Caddy routes `/api/anime/*` to this port.
+<ParamField body="ISAO_PORT" type="number" default="4003">
+  Port the Isao anime metadata API service binds on. Caddy routes `/api/anime/*` to this port. `setup.sh` always passes `ISAO_PORT=6001` in the PM2 environment, overriding the binary default.
 </ParamField>
 
 ## Setup-Time Overrides
